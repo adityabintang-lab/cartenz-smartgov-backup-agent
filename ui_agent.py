@@ -835,7 +835,7 @@ def dashboard_view(cfg: Dict[str, Any]) -> str:
         '<section class="card"><h2>Arsip terbaru</h2><div class="scroll"><table>'
         "<thead><tr><th>Nama</th><th>Ukuran</th><th>Waktu</th></tr></thead><tbody id=\"files\"></tbody></table></div></section>"
         '<section class="card"><h2>Log backup</h2><pre class="log" id="log" tabindex="0" aria-label="Log backup">Memuat…</pre></section>'
-        '<section class="card"><details><summary>Pengaturan</summary>' + settings_form(cfg, setup=False)
+        '<section class="card"><details open><summary>Pengaturan Agent</summary>' + settings_form(cfg, setup=False)
         + "</details></section>"
     )
 
