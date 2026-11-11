@@ -1,0 +1,9 @@
+# Jangan pernah commit data runtime / rahasia
+agent_data/
+backups/
+logs/
+secrets/
+.env
+*.age
+__pycache__/
+*.pyc
