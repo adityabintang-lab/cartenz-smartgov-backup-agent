@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 """Unggah arsip backup ke Object Storage lewat presigned URL dari Central Gateway."""
 import json
+import logging
 import os
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlparse
 
 import requests
 
 CONFIG_FILE = os.environ.get("CONFIG_FILE", "/app/data/agent_config.json")
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
+
+# Konfigurasi Logging (Aktifkan mode verbose/debug dengan variabel lingkungan DEBUG=1)
+DEBUG_MODE = os.environ.get("DEBUG", "0").lower() in ("1", "true", "yes")
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG_MODE else logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("agent.uploader")
 
 
 class UploadError(Exception):
@@ -18,16 +28,12 @@ class UploadError(Exception):
         self.retry = retry
 
 
-def log(msg: str) -> None:
-    sys.stderr.write(msg + "\n")
-    sys.stderr.flush()
-
-
 def load_agent_config() -> dict:
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        logger.error(f"Gagal membaca file konfigurasi {CONFIG_FILE}: {e}")
         return {}
 
 
@@ -36,20 +42,47 @@ def _valid_http_url(url: str) -> bool:
     return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
+def _mask_headers(headers: dict) -> dict:
+    """Menyamarkan data kredensial pada header sebelum dicetak ke log."""
+    masked = dict(headers)
+    if "Authorization" in masked:
+        masked["Authorization"] = "Bearer ***MASKED_AGENT_TOKEN***"
+    if "authorization" in masked:
+        masked["authorization"] = "Bearer ***MASKED_AGENT_TOKEN***"
+    return masked
+
+
+def _mask_url(url: str) -> str:
+    """Menyamarkan signature query string pada Presigned URL COS."""
+    parsed = urlparse(url)
+    if parsed.query:
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?***MASKED_PRESIGNED_PARAMS***"
+    return url
+
+
 def _attempt(central_url: str, token: str, local_path: str) -> None:
     filename = os.path.basename(local_path)
     file_size = os.path.getsize(local_path)
 
     # 1. Minta presigned upload URL (URL baru di tiap percobaan karena bisa kedaluwarsa)
+    request_headers = {"Authorization": f"Bearer {token}"}
+    request_params = {"filename": filename}
+    endpoint_url = f"{central_url}/api/v1/get-upload-url"
+
+    logger.debug(f"[REQ OUT] POST {endpoint_url} | Params: {request_params}")
+    logger.debug(f"[REQ OUT] Headers: {_mask_headers(request_headers)}")
+
     try:
         resp = requests.post(
-            f"{central_url}/api/v1/get-upload-url",
-            params={"filename": filename},
-            headers={"Authorization": f"Bearer {token}"},
+            endpoint_url,
+            params=request_params,
+            headers=request_headers,
             timeout=(10, 30),
         )
     except requests.RequestException as e:
         raise UploadError(f"Tidak dapat menghubungi server pusat ({type(e).__name__})")
+
+    logger.debug(f"[RESP IN] HTTP {resp.status_code} | Body: {resp.text[:300]}")
 
     if resp.status_code != 200:
         # 4xx (token salah, dsb.) tidak akan membaik dengan mengulang
@@ -57,26 +90,41 @@ def _attempt(central_url: str, token: str, local_path: str) -> None:
             f"Server pusat menolak permintaan URL (HTTP {resp.status_code}): {resp.text[:200]}",
             retry=resp.status_code >= 500,
         )
+
     try:
         upload_url = resp.json().get("upload_url")
     except ValueError:
         upload_url = None
+
     if not upload_url or not _valid_http_url(upload_url):
         raise UploadError("Respons server pusat tidak berisi upload_url yang valid.", retry=False)
 
-    # 2. Stream langsung ke COS. Jangan log exception mentah: pesannya memuat URL bertanda tangan.
+    # 2. Stream langsung ke COS.
+    put_headers = {"Content-Length": str(file_size)}
+    masked_cos_url = _mask_url(upload_url)
+
+    logger.info(f"Mengunggah berkas '{filename}' ({file_size} bytes) ke Object Storage...")
+    logger.debug(f"[COS PUT OUT] URL: {masked_cos_url}")
+    logger.debug(f"[COS PUT OUT] Headers: {put_headers}")
+
     try:
         with open(local_path, "rb") as f:
             put = requests.put(
-                upload_url, data=f,
-                headers={"Content-Length": str(file_size)},
+                upload_url,
+                data=f,
+                headers=put_headers,
                 timeout=(10, 3600),
             )
     except requests.RequestException as e:
         raise UploadError(f"Gagal mengunggah ke object storage ({type(e).__name__})")
+
+    logger.debug(f"[COS RESP IN] HTTP {put.status_code}")
+
     if put.status_code not in (200, 204):
-        raise UploadError(f"Object storage menolak unggahan (HTTP {put.status_code}).",
-                          retry=put.status_code >= 500)
+        raise UploadError(
+            f"Object storage menolak unggahan (HTTP {put.status_code}).",
+            retry=put.status_code >= 500,
+        )
 
 
 def upload_file(local_path: str) -> bool:
@@ -85,31 +133,44 @@ def upload_file(local_path: str) -> bool:
     token = cfg.get("agent_token", "")
 
     if not central_url or not token:
-        log("Agent belum dikonfigurasi via Web UI.")
+        logger.error("Agent belum dikonfigurasi via Web UI (central_url/agent_token kosong).")
         return False
+
     if not _valid_http_url(central_url):
-        log("central_url tidak valid (harus http:// atau https://).")
+        logger.error("central_url tidak valid (harus diawali http:// atau https://).")
         return False
+
     if not os.path.isfile(local_path):
-        log(f"Berkas tidak ditemukan: {local_path}")
+        logger.error(f"Berkas tidak ditemukan: {local_path}")
         return False
+
     if central_url.startswith("http://"):
-        log("PERINGATAN: central_url memakai HTTP tanpa TLS; token agent terkirim tanpa enkripsi.")
+        logger.warning("PERINGATAN: central_url memakai HTTP tanpa TLS; token agent terkirim tanpa enkripsi!")
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
+            logger.info(f"Memulai proses unggah (Percobaan {attempt}/{MAX_ATTEMPTS})...")
             _attempt(central_url, token, local_path)
+            logger.info("Berhasil mengunggah berkas ke Object Storage!")
             return True
         except UploadError as e:
-            log(f"Percobaan {attempt}/{MAX_ATTEMPTS} gagal: {e}")
+            logger.error(f"Percobaan {attempt}/{MAX_ATTEMPTS} gagal: {e}")
             if not e.retry or attempt == MAX_ATTEMPTS:
                 return False
-            time.sleep(5 * attempt)
+            backoff_time = 5 * attempt
+            logger.info(f"Menunggu {backoff_time} detik sebelum mencoba lagi...")
+            time.sleep(backoff_time)
     return False
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "upload":
-        sys.exit(0 if upload_file(sys.argv[2]) else 1)
+    if len(sys.argv) >= 2 and sys.argv[1] == "upload":
+        if len(sys.argv) == 3:
+            target_file = sys.argv[2]
+            success = upload_file(target_file)
+            sys.exit(0 if success else 1)
+        else:
+            logger.error("Nama berkas tidak ditentukan.")
+
     sys.stderr.write("Penggunaan: cos.py upload <berkas>\n")
     sys.exit(64)
