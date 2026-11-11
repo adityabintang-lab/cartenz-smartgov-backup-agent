@@ -38,7 +38,19 @@ Database dan aplikasi disimpan sebagai arsip terpisah:
 
 Nama folder daerah berasal dari nama server/token yang dibuat di dashboard Gateway. Contohnya, token bernama `Kabupaten Bogor` menghasilkan folder `backups/kabupaten_bogor/`. Nama token yang menghasilkan folder sama ditolak agar arsip dua Agent tidak tercampur.
 
-Dump database memakai `mariadb-dump --all-databases` serta menyertakan routines, triggers, dan events. Akun MariaDB perlu memiliki izin membaca database yang ingin dicadangkan. Berkas aplikasi bersifat opsional dan ikut dibackup jika direktori aplikasi dipasang ke `/app/smartgov_app`.
+Dump database memakai `mariadb-dump --all-databases` serta menyertakan routines, triggers, dan events. Akun MariaDB perlu memiliki izin membaca database yang ingin dicadangkan.
+
+### Memilih folder aplikasi dari UI
+
+Container Agent hanya dapat membaca folder host yang sudah di-mount. Di tiap server, atur satu root host di file `.env` pada folder Agent, lalu rebuild/restart Agent:
+
+```dotenv
+APP_SOURCE_HOST_ROOT=/opt/cartenz/teknolab/smartgov
+```
+
+Buat direktori root tersebut di host, lalu jalankan `docker compose up -d --build` dari folder Agent. Mount tersedia read-only di container sebagai `/backup_sources`. Di Pengaturan Agent isi **Subfolder aplikasi** relatif terhadap root, misalnya `revenue`. Jika root server lain adalah `/home/cartenz/teknolab/smartgov`, atur nilai `.env` server itu ke path tersebut dan isi subfolder UI yang sama. Berikan user container (UID 1000) izin baca dan traverse pada folder serta file yang dipilih. Kosongkan kolom UI untuk menonaktifkan backup aplikasi.
+
+Path UI dibatasi ke subfolder di dalam root yang di-mount; path absolut dan traversal ke luar root ditolak.
 
 ## Jadwal dan retensi
 
@@ -85,7 +97,7 @@ age -d -i kunci-backup.txt backups/application/smartgov_application_XXXX.tar.gz.
 
 - State jadwal tersimpan di `agent_data/backup_state.json`, jadi restart container tidak memicu backup kalender ulang. Backup gagal dicoba lagi paling lama satu jam kemudian.
 - Status akhir: **Berhasil**, **Arsip lokal OK, unggah gagal** (exit 2), **Terunggah, rotasi COS gagal** (exit 3), atau **Gagal**.
-- Berkas aplikasi ikut dibackup bila Anda mount ke `/app/smartgov_app` (lihat contoh di `docker-compose.yml`).
+- Berkas aplikasi ikut dibackup bila subfoldernya diatur di Pengaturan Agent dan tersedia di root host yang di-mount.
 - Jangan menaikkan `--workers` uvicorn: penjadwal dan lock berjalan per-proses.
 - `agent_data/agent_config.json` (0600) memuat password DB dan token agent dalam bentuk plaintext karena
   dibutuhkan untuk menjalankan backup; lindungi direktorinya. Password admin disimpan sebagai hash scrypt.

@@ -8,7 +8,7 @@ CONFIG_FILE="${CONFIG_FILE:-/app/data/agent_config.json}"
 BACKUP_DIR="${BACKUP_DIR:-/app/backups}"
 LOG_DIR="${LOG_DIR:-/app/logs}"
 SECRETS_DIR="${SECRETS_DIR:-/app/secrets}"
-APP_SOURCE_DIR="${APP_SOURCE_DIR:-/app/smartgov_app}"
+APP_SOURCE_ROOT="${APP_SOURCE_ROOT:-/backup_sources}"
 LOCK_FILE="${LOCK_FILE:-/tmp/smartgov-backup.lock}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -58,13 +58,15 @@ import json, sys
 c = json.load(open(sys.argv[1], encoding="utf-8"))
 for key, default in (("db_host", ""), ("db_port", 3306), ("db_user", ""), ("db_pass", ""),
                      ("db_name", ""), ("age_recipient", ""), ("database_max_files", 7),
-                     ("application_max_files", 2)):
+                     ("application_max_files", 2), ("application_source_path", "")):
     print(str(c.get(key, default)).replace("\n", " ").replace("\r", " "))
 PY
 )
 DB_HOST="${CFG[0]:-}"; DB_PORT="${CFG[1]:-3306}"; DB_USER="${CFG[2]:-}"; DB_PASS="${CFG[3]:-}"
 DB_NAME="${CFG[4]:-}"; AGE_RECIPIENT="${CFG[5]:-}"
 DATABASE_MAX_FILES="${CFG[6]:-7}"; APPLICATION_MAX_FILES="${CFG[7]:-2}"
+APP_SOURCE_SUBPATH="${CFG[8]:-}"
+APP_SOURCE_DIR=""
 
 [[ "$DB_PORT" =~ ^[0-9]+$ ]] || DB_PORT=3306
 for limit_name in DATABASE_MAX_FILES APPLICATION_MAX_FILES; do
@@ -119,15 +121,41 @@ else
     log "PERINGATAN: Konfigurasi koneksi DB belum lengkap. Dump database dilewati."
 fi
 
-# 2. Berkas aplikasi (opsional), disimpan pada arsip tersendiri.
-if [ -d "$APP_SOURCE_DIR" ] && [ -n "$(ls -A "$APP_SOURCE_DIR" 2>/dev/null)" ]; then
-    log "Menyalin berkas aplikasi dari ${APP_SOURCE_DIR}..."
-    if cp -a "$APP_SOURCE_DIR" "${APP_PAYLOAD}/app_data"; then
-        APP_READY=1
-    else
-        log "ERROR: Gagal menyalin berkas aplikasi."
+# 2. Berkas aplikasi (opsional), dipilih relatif terhadap root yang di-mount read-only.
+if [ -n "$APP_SOURCE_SUBPATH" ]; then
+    if [[ "$APP_SOURCE_SUBPATH" = /* || "$APP_SOURCE_SUBPATH" == *\\* ||
+          "$APP_SOURCE_SUBPATH" =~ (^|/)\.\.?(/|$) ]]; then
+        log "ERROR: Path aplikasi harus relatif dan tidak boleh keluar dari root yang di-mount."
         BACKUP_FAILED=1
+    else
+        APP_SOURCE_ROOT_REAL="$(realpath -e "$APP_SOURCE_ROOT" 2>/dev/null || true)"
+        APP_SOURCE_DIR="$(realpath -e "${APP_SOURCE_ROOT}/${APP_SOURCE_SUBPATH}" 2>/dev/null || true)"
+        if [ -z "$APP_SOURCE_ROOT_REAL" ]; then
+            log "ERROR: Root sumber aplikasi ${APP_SOURCE_ROOT} tidak tersedia di container."
+            BACKUP_FAILED=1
+        elif [ -z "$APP_SOURCE_DIR" ] || [ ! -d "$APP_SOURCE_DIR" ]; then
+            log "ERROR: Subfolder aplikasi '${APP_SOURCE_SUBPATH}' tidak ditemukan di root sumber."
+            APP_SOURCE_DIR=""
+            BACKUP_FAILED=1
+        elif [[ "$APP_SOURCE_DIR" != "$APP_SOURCE_ROOT_REAL/"* ]]; then
+            log "ERROR: Path aplikasi mengarah ke luar root sumber yang di-mount."
+            APP_SOURCE_DIR=""
+            BACKUP_FAILED=1
+        elif [ -n "$(ls -A "$APP_SOURCE_DIR" 2>/dev/null)" ]; then
+            log "Menyalin berkas aplikasi dari ${APP_SOURCE_DIR}..."
+            if cp -a "$APP_SOURCE_DIR" "${APP_PAYLOAD}/app_data"; then
+                APP_READY=1
+            else
+                log "ERROR: Gagal menyalin berkas aplikasi."
+                BACKUP_FAILED=1
+            fi
+        else
+            log "ERROR: Subfolder aplikasi '${APP_SOURCE_SUBPATH}' kosong atau tidak dapat dibaca."
+            BACKUP_FAILED=1
+        fi
     fi
+else
+    log "Berkas aplikasi belum dikonfigurasi; backup aplikasi dilewati."
 fi
 
 if [ "$DB_READY" -ne 1 ] && [ "$APP_READY" -ne 1 ]; then

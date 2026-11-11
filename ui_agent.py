@@ -201,6 +201,7 @@ class SettingsIn(BaseModel):
     db_user: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$")
     db_pass: Optional[str] = Field(default=None, max_length=256)
     db_name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_$]+$")
+    application_source_path: str = Field(default="", max_length=1024)
     central_url: str = Field(min_length=1, max_length=300)
     agent_token: Optional[str] = Field(default=None, max_length=512)
     age_recipient: Optional[str] = Field(default=None, pattern=r"^age1[a-z0-9]{58}$")
@@ -234,6 +235,18 @@ class SettingsIn(BaseModel):
             raise ValueError("tidak boleh memuat user/password di dalam URL")
         return v.rstrip("/")
 
+    @field_validator("application_source_path")
+    @classmethod
+    def _valid_application_source_path(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            return ""
+        if v.startswith("/") or "\\" in v or _CTRL.search(v):
+            raise ValueError("gunakan path relatif di bawah root folder yang di-mount")
+        if any(part in ("", ".", "..") for part in v.split("/")):
+            raise ValueError("path tidak boleh keluar dari root folder yang di-mount")
+        return v
+
     @field_validator("schedule_time")
     @classmethod
     def _valid_schedule_time(cls, v: str) -> str:
@@ -247,7 +260,8 @@ class SettingsIn(BaseModel):
 FIELD_LABELS = {
     "setup_token": "Token setup", "admin_user": "Username admin", "admin_password": "Password admin",
     "db_host": "DB host", "db_port": "DB port", "db_user": "DB user", "db_pass": "DB password",
-    "db_name": "Database untuk uji koneksi", "central_url": "URL server pusat", "agent_token": "Agent API token",
+    "db_name": "Database untuk uji koneksi", "application_source_path": "Subfolder aplikasi",
+    "central_url": "URL server pusat", "agent_token": "Agent API token",
     "age_recipient": "Public key age", "interval_seconds": "Interval backup",
     "schedule_time": "Waktu backup", "monthly_day": "Tanggal backup bulanan",
     "database_max_files": "Maksimum arsip database",
@@ -299,7 +313,7 @@ def build_config(existing: Dict[str, Any], data: SettingsIn) -> Dict[str, Any]:
     cfg.pop("admin_password", None)
     cfg.update(
         admin_user=data.admin_user, db_host=data.db_host, db_port=data.db_port, db_user=data.db_user,
-        db_name=data.db_name, central_url=data.central_url,
+        db_name=data.db_name, application_source_path=data.application_source_path, central_url=data.central_url,
         schedule_mode=data.schedule_mode, interval_seconds=data.interval_seconds,
         schedule_time=data.schedule_time, monthly_day=data.monthly_day,
         database_max_files=data.database_max_files, application_max_files=data.application_max_files,
@@ -643,19 +657,24 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
         + field("db_pass", "Password", type="password", required=setup, autocomplete="new-password",
                 hint="" if setup else keep)
         + "</div></fieldset>"
-        + "<fieldset><legend>3. Server pusat</legend><div class=\"row\">"
+        + "<fieldset><legend>3. Berkas aplikasi opsional</legend><div class=\"row\">"
+        + field("application_source_path", "Subfolder aplikasi", value=cfg.get("application_source_path", ""),
+                placeholder="revenue",
+                hint="Path relatif di bawah root host yang di-mount read-only. Kosongkan jika tidak ingin backup berkas aplikasi.")
+        + "</div></fieldset>"
+        + "<fieldset><legend>4. Server pusat</legend><div class=\"row\">"
         + field("central_url", "Central Gateway URL", type="url", value=cfg.get("central_url", ""), required=True,
                 placeholder="https://pusat.example.go.id:25300", hint="Gunakan https:// agar token terenkripsi.")
         + field("agent_token", "Agent API token", type="password", required=setup, autocomplete="new-password",
                 hint="" if setup else keep)
         + "</div></fieldset>"
-        + "<fieldset><legend>4. Enkripsi</legend><div class=\"row\">"
+        + "<fieldset><legend>5. Enkripsi</legend><div class=\"row\">"
         + field("age_recipient", "Public key age (disarankan)", value=cfg.get("age_recipient", ""),
                 placeholder="age1...", spellcheck="false",
                 hint="Buat dengan 'age-keygen' di komputer Anda dan simpan private key OFFLINE. Jika kosong, "
                      "agent membuat keypair di server ini (kurang aman).")
         + "</div></fieldset>"
-        + "<fieldset><legend>5. Jadwal backup</legend>"
+        + "<fieldset><legend>6. Jadwal backup</legend>"
         + '<div class="row"><div class="field"><label for="schedule_mode">Pola jadwal</label>'
         + '<select id="schedule_mode" name="schedule_mode">'
         + f'<option value="interval" {"selected" if schedule_mode == "interval" else ""}>Setiap interval</option>'
@@ -678,7 +697,7 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
                 required=True, min=1, max=31, hint="Jika tanggal tidak ada di bulan tersebut, jadwal memakai hari terakhir.")
         + "</div></div>"
         + "</fieldset>"
-        + "<fieldset><legend>6. Batas arsip per agent (lokal dan COS)</legend><div class=\"row\">"
+        + "<fieldset><legend>7. Batas arsip per agent (lokal dan COS)</legend><div class=\"row\">"
         + field("database_max_files", "Maksimum arsip database", type="number",
                 value=cfg.get("database_max_files", 7), required=True, min=1, max=3650,
                 hint="Arsip lokal dirotasi setelah dibuat; arsip COS setelah berhasil diunggah.")
@@ -820,7 +839,8 @@ if (form) {
     if (pw !== val('admin_password2', false)) { notice('err', 'Password admin dan konfirmasinya tidak sama.'); return; }
     const payload = {
       admin_user: val('admin_user'), db_host: val('db_host'), db_port: Number(val('db_port')),
-      db_user: val('db_user'), db_name: val('db_name'), central_url: val('central_url'),
+      db_user: val('db_user'), db_name: val('db_name'),
+      application_source_path: val('application_source_path'), central_url: val('central_url'),
       schedule_mode: val('schedule_mode'),
       interval_seconds: Math.round(Number(val('interval_value')) * (val('interval_unit') === 'hours' ? 3600 : 60)),
       schedule_time: val('schedule_time'),
