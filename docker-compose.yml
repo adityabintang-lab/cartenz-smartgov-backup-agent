@@ -13,6 +13,8 @@ services:
       - ./backups:/app/backups
       - ./logs:/app/logs
       - ./secrets:/app/secrets
+      # Scheduler mengikuti zona waktu lokal server.
+      - /etc/localtime:/etc/localtime:ro
       # Opsional: berkas aplikasi yang ikut dibackup (read-only)
       # - /path/ke/smartgov_app:/app/smartgov_app:ro
     # Hardening container

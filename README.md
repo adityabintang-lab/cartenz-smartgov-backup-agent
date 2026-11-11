@@ -1,6 +1,6 @@
 # SmartGOV Backup Agent
 
-Agent di server target: dump MariaDB (+ opsional berkas aplikasi) → `tar.gz` → enkripsi **age** → unggah ke Object Storage lewat presigned URL dari Central Gateway. Dashboard web untuk setup, status, dan backup manual.
+Agent di server target membackup **semua database MariaDB** dan, bila dipasang, berkas aplikasi ke dalam arsip terenkripsi **age** yang terpisah. Arsip lokal diunggah ke Object Storage melalui presigned URL dari Central Gateway. Dashboard menyediakan setup, status, konfigurasi jadwal, retensi, dan backup manual.
 
 ## Instalasi cepat (server agent)
 
@@ -29,6 +29,31 @@ Dashboard: `http://127.0.0.1:25200` (default hanya localhost). Akses remote: SSH
 Setup pertama membutuhkan **token setup** (dicetak di log container) sehingga orang lain di jaringan tidak bisa
 merebut agent sebelum Anda. Setelah setup, semua perubahan lewat *Pengaturan* di dashboard (butuh login).
 
+## Pemisahan file backup
+
+Database dan aplikasi disimpan sebagai arsip terpisah:
+
+- Lokal: `backups/database/` dan `backups/application/`.
+- COS: `backups/<nama-daerah-agent>/database/` dan `backups/<nama-daerah-agent>/application/`.
+
+Nama folder daerah berasal dari nama server/token yang dibuat di dashboard Gateway. Contohnya, token bernama `Kabupaten Bogor` menghasilkan folder `backups/kabupaten_bogor/`. Nama token yang menghasilkan folder sama ditolak agar arsip dua Agent tidak tercampur.
+
+Dump database memakai `mariadb-dump --all-databases` serta menyertakan routines, triggers, dan events. Akun MariaDB perlu memiliki izin membaca database yang ingin dicadangkan. Berkas aplikasi bersifat opsional dan ikut dibackup jika direktori aplikasi dipasang ke `/app/smartgov_app`.
+
+## Jadwal dan retensi
+
+Di Pengaturan Agent, pilih salah satu pola:
+
+- **Interval:** setiap N menit atau jam (minimum 1 menit).
+- **Harian:** pada jam dan menit yang ditentukan.
+- **Bulanan:** pada tanggal dan jam tertentu; bila tanggal tersebut tidak ada pada bulan itu, backup berjalan pada hari terakhir bulan.
+
+Jadwal harian dan bulanan mengikuti zona waktu lokal server. Backup kalender pertama menunggu jadwal berikutnya; backup pertama dengan mode interval langsung dijalankan. Backup manual tetap tersedia dari dashboard.
+
+Batas awal per Agent adalah **7 arsip database** dan **2 arsip aplikasi**, baik di disk Agent maupun di COS. Batas dapat diubah di Pengaturan Agent. File lokal tertua dihapus setelah arsip baru dibuat; file COS tertua dihapus setelah arsip baru berhasil diunggah. Jika upload atau penghapusan di COS gagal, kegagalan ditampilkan di log dan file lokal tetap tersedia. Status dashboard membedakan kegagalan upload dari kegagalan rotasi COS. Berikan kredensial COS izin menghapus objek pada prefix backup agar rotasi jarak jauh berfungsi.
+
+Arsip gabungan dari versi lama yang berada langsung di root `backups/` lokal atau `backups/<daerah>/` COS dipertahankan dan tidak ikut rotasi kategori otomatis.
+
 ## Enkripsi & pemulihan
 
 Buat keypair **di komputer Anda**, bukan di server:
@@ -41,18 +66,25 @@ age-keygen -o kunci-backup.txt      # simpan file ini OFFLINE (password manager 
 Jika kolom itu dikosongkan, agent membuat keypair di `secrets/` dan dashboard menampilkan peringatan: private key
 yang tersimpan di server yang sama dengan backup berarti penyerang yang menguasai server bisa membuka semuanya.
 
-Pemulihan:
+Pemulihan database:
 
 ```bash
-age -d -i kunci-backup.txt smartgov_backup_XXXX.tar.gz.age | tar -xz -C ./restore
-mariadb -h HOST -u USER -p NAMA_DB < ./restore/database.sql
+mkdir -p ./restore/database
+age -d -i kunci-backup.txt backups/database/smartgov_database_XXXX.tar.gz.age | tar -xz -C ./restore/database
+mariadb -h HOST -u USER -p < ./restore/database/database.sql
+```
+
+Pemulihan berkas aplikasi:
+
+```bash
+mkdir -p ./restore/application
+age -d -i kunci-backup.txt backups/application/smartgov_application_XXXX.tar.gz.age | tar -xz -C ./restore/application
 ```
 
 ## Catatan operasional
 
-- Jadwal mengikuti *Interval backup*; state tersimpan di `agent_data/backup_state.json`, jadi restart container
-  tidak memicu backup ulang. Backup gagal dicoba lagi paling lama 1 jam kemudian.
-- Status akhir: **Berhasil**, **Arsip lokal OK, unggah gagal** (exit 2), atau **Gagal**.
+- State jadwal tersimpan di `agent_data/backup_state.json`, jadi restart container tidak memicu backup kalender ulang. Backup gagal dicoba lagi paling lama satu jam kemudian.
+- Status akhir: **Berhasil**, **Arsip lokal OK, unggah gagal** (exit 2), **Terunggah, rotasi COS gagal** (exit 3), atau **Gagal**.
 - Berkas aplikasi ikut dibackup bila Anda mount ke `/app/smartgov_app` (lihat contoh di `docker-compose.yml`).
 - Jangan menaikkan `--workers` uvicorn: penjadwal dan lock berjalan per-proses.
 - `agent_data/agent_config.json` (0600) memuat password DB dan token agent dalam bentuk plaintext karena

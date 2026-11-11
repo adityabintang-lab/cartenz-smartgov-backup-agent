@@ -60,13 +60,13 @@ def _mask_url(url: str) -> str:
     return url
 
 
-def _attempt(central_url: str, token: str, local_path: str) -> None:
+def _attempt(central_url: str, token: str, local_path: str, category: str) -> None:
     filename = os.path.basename(local_path)
     file_size = os.path.getsize(local_path)
 
     # 1. Minta presigned upload URL (URL baru di tiap percobaan karena bisa kedaluwarsa)
     request_headers = {"Authorization": f"Bearer {token}"}
-    request_params = {"filename": filename}
+    request_params = {"filename": filename, "category": category}
     endpoint_url = f"{central_url}/api/v1/get-upload-url"
 
     logger.debug(f"[REQ OUT] POST {endpoint_url} | Params: {request_params}")
@@ -127,11 +127,14 @@ def _attempt(central_url: str, token: str, local_path: str) -> None:
         )
 
 
-def upload_file(local_path: str) -> bool:
+def upload_file(local_path: str, category: str) -> bool:
     cfg = load_agent_config()
     central_url = str(cfg.get("central_url", "")).rstrip("/")
     token = cfg.get("agent_token", "")
 
+    if category not in ("database", "application", "archive"):
+        logger.error("Kategori arsip tidak valid.")
+        return False
     if not central_url or not token:
         logger.error("Agent belum dikonfigurasi via Web UI (central_url/agent_token kosong).")
         return False
@@ -150,7 +153,7 @@ def upload_file(local_path: str) -> bool:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             logger.info(f"Memulai proses unggah (Percobaan {attempt}/{MAX_ATTEMPTS})...")
-            _attempt(central_url, token, local_path)
+            _attempt(central_url, token, local_path, category)
             logger.info("Berhasil mengunggah berkas ke Object Storage!")
             return True
         except UploadError as e:
@@ -163,14 +166,62 @@ def upload_file(local_path: str) -> bool:
     return False
 
 
+def rotate_backups(category: str, max_files: int) -> bool:
+    cfg = load_agent_config()
+    central_url = str(cfg.get("central_url", "")).rstrip("/")
+    token = cfg.get("agent_token", "")
+    if category not in ("database", "application"):
+        logger.error("Kategori rotasi tidak valid.")
+        return False
+    try:
+        max_files = int(max_files)
+    except (TypeError, ValueError):
+        logger.error("Batas maksimum file tidak valid.")
+        return False
+    if not 1 <= max_files <= 3650:
+        logger.error("Batas maksimum file harus antara 1 dan 3650.")
+        return False
+    if not central_url or not token or not _valid_http_url(central_url):
+        logger.error("Agent belum memiliki URL Gateway dan token yang valid.")
+        return False
+
+    url = f"{central_url}/api/v1/rotate-backups"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        response = requests.post(
+            url,
+            params={"category": category, "max_files": max_files},
+            headers=headers,
+            timeout=(10, 60),
+        )
+    except requests.RequestException as exc:
+        logger.error(f"Gagal meminta rotasi arsip COS ({type(exc).__name__}).")
+        return False
+    if response.status_code != 200:
+        logger.error(f"Gateway menolak rotasi arsip COS (HTTP {response.status_code}).")
+        return False
+    try:
+        deleted = int(response.json().get("deleted", 0))
+    except (ValueError, TypeError):
+        logger.error("Respons rotasi arsip COS tidak valid.")
+        return False
+    logger.info(f"Rotasi arsip COS {category} selesai; {deleted} file lama dihapus.")
+    return True
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "upload":
-        if len(sys.argv) == 3:
-            target_file = sys.argv[2]
-            success = upload_file(target_file)
-            sys.exit(0 if success else 1)
+        if len(sys.argv) == 4:
+            category, target_file = sys.argv[2], sys.argv[3]
+        elif len(sys.argv) == 3:
+            category, target_file = "archive", sys.argv[2]
         else:
-            logger.error("Nama berkas tidak ditentukan.")
+            logger.error("Gunakan kategori dan nama berkas.")
+            sys.exit(64)
+        sys.exit(0 if upload_file(target_file, category) else 1)
+    if len(sys.argv) == 4 and sys.argv[1] == "rotate":
+        sys.exit(0 if rotate_backups(sys.argv[2], sys.argv[3]) else 1)
 
-    sys.stderr.write("Penggunaan: cos.py upload <berkas>\n")
+    sys.stderr.write("Penggunaan: cos.py upload <database|application> <berkas>\n")
+    sys.stderr.write("             cos.py rotate <database|application> <maksimum-file>\n")
     sys.exit(64)

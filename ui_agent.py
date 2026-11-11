@@ -13,9 +13,11 @@ import signal
 import subprocess
 import threading
 import time
+from calendar import monthrange
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -36,7 +38,7 @@ BACKUP_SCRIPT = os.environ.get("BACKUP_SCRIPT", "/app/scripts/backup.sh")
 LOG_FILE = LOG_DIR / "backup.log"
 BACKUP_TIMEOUT = int(os.environ.get("BACKUP_TIMEOUT", "21600"))  # 6 jam
 SCHEDULER_DELAY = int(os.environ.get("SCHEDULER_DELAY", "20"))
-MIN_INTERVAL, MAX_INTERVAL = 3600, 604800
+MIN_INTERVAL, MAX_INTERVAL = 60, 604800
 
 # Token sekali-pakai untuk setup awal: ditampilkan di log container, bukan di jaringan.
 SETUP_TOKEN = os.environ.get("SETUP_TOKEN") or secrets.token_urlsafe(24)
@@ -202,8 +204,12 @@ class SettingsIn(BaseModel):
     central_url: str = Field(min_length=1, max_length=300)
     agent_token: Optional[str] = Field(default=None, max_length=512)
     age_recipient: Optional[str] = Field(default=None, pattern=r"^age1[a-z0-9]{58}$")
-    retention_days: int = Field(default=30, ge=1, le=3650)
+    schedule_mode: Literal["interval", "daily", "monthly"] = "interval"
     interval_seconds: int = Field(default=86400, ge=MIN_INTERVAL, le=MAX_INTERVAL)
+    schedule_time: str = Field(default="02:00", min_length=5, max_length=5)
+    monthly_day: int = Field(default=1, ge=1, le=31)
+    database_max_files: int = Field(default=7, ge=1, le=3650)
+    application_max_files: int = Field(default=2, ge=1, le=3650)
 
     @field_validator("admin_password", "db_pass", "agent_token", "age_recipient", mode="before")
     @classmethod
@@ -228,13 +234,24 @@ class SettingsIn(BaseModel):
             raise ValueError("tidak boleh memuat user/password di dalam URL")
         return v.rstrip("/")
 
+    @field_validator("schedule_time")
+    @classmethod
+    def _valid_schedule_time(cls, v: str) -> str:
+        try:
+            datetime.strptime(v, "%H:%M")
+        except ValueError as exc:
+            raise ValueError("gunakan format jam HH:MM (00:00–23:59)") from exc
+        return v
+
 
 FIELD_LABELS = {
     "setup_token": "Token setup", "admin_user": "Username admin", "admin_password": "Password admin",
     "db_host": "DB host", "db_port": "DB port", "db_user": "DB user", "db_pass": "DB password",
-    "db_name": "Nama database", "central_url": "URL server pusat", "agent_token": "Agent API token",
-    "age_recipient": "Public key age", "retention_days": "Retensi (hari)",
-    "interval_seconds": "Interval backup",
+    "db_name": "Database untuk uji koneksi", "central_url": "URL server pusat", "agent_token": "Agent API token",
+    "age_recipient": "Public key age", "interval_seconds": "Interval backup",
+    "schedule_time": "Waktu backup", "monthly_day": "Tanggal backup bulanan",
+    "database_max_files": "Maksimum arsip database",
+    "application_max_files": "Maksimum arsip aplikasi",
 }
 PATTERN_HINTS = {
     "admin_user": "hanya huruf, angka, titik, garis bawah, dan strip",
@@ -283,7 +300,9 @@ def build_config(existing: Dict[str, Any], data: SettingsIn) -> Dict[str, Any]:
     cfg.update(
         admin_user=data.admin_user, db_host=data.db_host, db_port=data.db_port, db_user=data.db_user,
         db_name=data.db_name, central_url=data.central_url,
-        retention_days=data.retention_days, interval_seconds=data.interval_seconds,
+        schedule_mode=data.schedule_mode, interval_seconds=data.interval_seconds,
+        schedule_time=data.schedule_time, monthly_day=data.monthly_day,
+        database_max_files=data.database_max_files, application_max_files=data.application_max_files,
     )
     if data.admin_password:
         cfg["admin_password_hash"] = hash_password(data.admin_password)
@@ -308,14 +327,51 @@ def _interval(cfg: Dict[str, Any]) -> int:
         return 86400
 
 
+def _next_calendar_run(cfg: Dict[str, Any], finished_at: float) -> float:
+    last = datetime.fromtimestamp(finished_at)
+    hour, minute = 2, 0
+    try:
+        hour, minute = (int(part) for part in str(cfg.get("schedule_time", "02:00")).split(":"))
+    except (TypeError, ValueError):
+        pass
+
+    target = last.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if cfg.get("schedule_mode") == "daily":
+        if target.timestamp() <= finished_at:
+            target += timedelta(days=1)
+        return target.timestamp()
+
+    month = last.month
+    year = last.year
+    for _ in range(2):
+        day = min(int(cfg.get("monthly_day", 1)), monthrange(year, month)[1])
+        target = last.replace(year=year, month=month, day=day, hour=hour, minute=minute,
+                              second=0, microsecond=0)
+        if target.timestamp() > finished_at:
+            return target.timestamp()
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+    return target.timestamp()
+
+
 def next_run_at(cfg: Dict[str, Any], state: Dict[str, Any]) -> float:
     last = state.get("last_run")
     if not last:
+        if cfg.get("schedule_mode", "interval") != "interval":
+            return _next_calendar_run(cfg, time.time())
         return 0.0  # belum pernah backup: jatuh tempo segera setelah scheduler aktif
-    interval = _interval(cfg)
-    # Setelah kegagalan, coba lagi lebih cepat (maks. 1 jam), bukan menunggu interval penuh.
-    wait = interval if last.get("status") == "success" else min(interval, 3600)
-    return float(last.get("finished_at", 0)) + wait
+    finished_at = float(last.get("finished_at", 0))
+    if cfg.get("schedule_mode", "interval") == "interval":
+        interval = _interval(cfg)
+        # Setelah kegagalan, coba lagi lebih cepat (maks. 1 jam), bukan menunggu interval penuh.
+        wait = interval if last.get("status") == "success" else min(interval, 3600)
+        return finished_at + wait
+    scheduled = _next_calendar_run(cfg, finished_at)
+    if last.get("status") != "success":
+        return min(scheduled, finished_at + 3600)
+    return scheduled
 
 
 class BackupManager:
@@ -342,7 +398,7 @@ class BackupManager:
             proc = subprocess.Popen([BACKUP_SCRIPT], stdin=subprocess.DEVNULL, start_new_session=True)
             try:
                 rc = proc.wait(timeout=BACKUP_TIMEOUT)
-                status = {0: "success", 2: "local_only", 75: "skipped"}.get(rc, "failed")
+                status = {0: "success", 2: "local_only", 3: "retention_failed", 75: "skipped"}.get(rc, "failed")
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)  # matikan juga mariadb-dump/tar/age anaknya
                 proc.wait()
@@ -379,7 +435,7 @@ def scheduler_loop(stop: threading.Event) -> None:
                 manager.start("scheduler")
         except Exception as exc:  # noqa: BLE001  (scheduler tidak boleh mati)
             print(f"[Scheduler] Error: {exc}", flush=True)
-        stop.wait(60)
+        stop.wait(10)
 
 
 # --------------------------------------------------------------------------- #
@@ -401,9 +457,9 @@ def collect_status() -> Dict[str, Any]:
     cfg, state = load_config(), load_state()
     files = []
     try:
-        for p in BACKUP_DIR.glob("*.age"):
+        for p in BACKUP_DIR.rglob("*.age"):
             st = p.stat()
-            files.append({"name": p.name, "size": st.st_size, "mtime": st.st_mtime})
+            files.append({"name": p.relative_to(BACKUP_DIR).as_posix(), "size": st.st_size, "mtime": st.st_mtime})
     except OSError:
         pass
     files.sort(key=lambda x: x["mtime"], reverse=True)
@@ -552,7 +608,12 @@ def field(fid: str, label: str, *, type: str = "text", value: Any = "", required
 
 def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
     keep = "Kosongkan jika tidak diubah"
-    hours = max(1, round(_interval(cfg) / 3600))
+    interval = _interval(cfg)
+    if interval % 3600 == 0:
+        interval_value, interval_unit = interval // 3600, "hours"
+    else:
+        interval_value, interval_unit = max(1, round(interval / 60)), "minutes"
+    schedule_mode = cfg.get("schedule_mode", "interval")
     token = ""
     if setup:
         token = (
@@ -576,7 +637,8 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
         + "<fieldset><legend>2. Database MariaDB lokal</legend><div class=\"row\">"
         + field("db_host", "Host", value=cfg.get("db_host", "smartgov-mariadb"), required=True)
         + field("db_port", "Port", type="number", value=cfg.get("db_port", 3306), required=True, min=1, max=65535)
-        + field("db_name", "Nama database", value=cfg.get("db_name", ""), required=True)
+        + field("db_name", "Database untuk uji koneksi", value=cfg.get("db_name", ""), required=True,
+                hint="Backup database mencakup seluruh database pada host ini.")
         + field("db_user", "User", value=cfg.get("db_user", ""), required=True, autocomplete="off")
         + field("db_pass", "Password", type="password", required=setup, autocomplete="new-password",
                 hint="" if setup else keep)
@@ -587,14 +649,42 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
         + field("agent_token", "Agent API token", type="password", required=setup, autocomplete="new-password",
                 hint="" if setup else keep)
         + "</div></fieldset>"
-        + "<fieldset><legend>4. Enkripsi & jadwal</legend><div class=\"row\">"
+        + "<fieldset><legend>4. Enkripsi</legend><div class=\"row\">"
         + field("age_recipient", "Public key age (disarankan)", value=cfg.get("age_recipient", ""),
                 placeholder="age1...", spellcheck="false",
                 hint="Buat dengan 'age-keygen' di komputer Anda dan simpan private key OFFLINE. Jika kosong, "
                      "agent membuat keypair di server ini (kurang aman).")
-        + field("interval_hours", "Interval backup (jam)", type="number", value=hours, required=True, min=1, max=168)
-        + field("retention_days", "Retensi arsip lokal (hari)", type="number",
-                value=cfg.get("retention_days", 30), required=True, min=1, max=3650)
+        + "</div></fieldset>"
+        + "<fieldset><legend>5. Jadwal backup</legend>"
+        + '<div class="row"><div class="field"><label for="schedule_mode">Pola jadwal</label>'
+        + '<select id="schedule_mode" name="schedule_mode">'
+        + f'<option value="interval" {"selected" if schedule_mode == "interval" else ""}>Setiap interval</option>'
+        + f'<option value="daily" {"selected" if schedule_mode == "daily" else ""}>Harian</option>'
+        + f'<option value="monthly" {"selected" if schedule_mode == "monthly" else ""}>Bulanan</option>'
+        + "</select></div></div>"
+        + '<div class="row" id="interval-settings">'
+        + field("interval_value", "Jalankan setiap", type="number", value=interval_value,
+                required=True, min=1, max=168)
+        + '<div class="field"><label for="interval_unit">Satuan interval</label>'
+        + f'<select id="interval_unit" name="interval_unit">'
+        + f'<option value="minutes" {"selected" if interval_unit == "minutes" else ""}>Menit</option>'
+        + f'<option value="hours" {"selected" if interval_unit == "hours" else ""}>Jam</option>'
+        + "</select></div></div>"
+        + '<div class="row" id="calendar-settings">'
+        + field("schedule_time", "Waktu (lokal server)", type="time",
+                value=cfg.get("schedule_time", "02:00"), required=True)
+        + '<div id="monthly-schedule-field">'
+        + field("monthly_day", "Tanggal dalam bulan", type="number", value=cfg.get("monthly_day", 1),
+                required=True, min=1, max=31, hint="Jika tanggal tidak ada di bulan tersebut, jadwal memakai hari terakhir.")
+        + "</div></div>"
+        + "</fieldset>"
+        + "<fieldset><legend>6. Batas arsip per agent (lokal dan COS)</legend><div class=\"row\">"
+        + field("database_max_files", "Maksimum arsip database", type="number",
+                value=cfg.get("database_max_files", 7), required=True, min=1, max=3650,
+                hint="Arsip lokal dirotasi setelah dibuat; arsip COS setelah berhasil diunggah.")
+        + field("application_max_files", "Maksimum arsip aplikasi", type="number",
+                value=cfg.get("application_max_files", 2), required=True, min=1, max=3650,
+                hint="Arsip lokal dirotasi setelah dibuat; arsip COS setelah berhasil diunggah.")
         + "</div></fieldset>"
         + '<label class="check"><input type="checkbox" id="show-pw"> Tampilkan password</label>'
         + '<button type="submit" class="primary" id="save-btn">'
@@ -626,7 +716,7 @@ fieldset{border:0;padding:0;margin:0 0 20px;min-width:0}
 legend{font-weight:600;color:var(--link);padding:0;margin-bottom:8px}
 .row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
 label{display:block;font-size:.9rem;margin-bottom:4px}
-input[type=text],input[type=password],input[type=number],input[type=url]{width:100%;min-height:44px;padding:8px 12px;
+input[type=text],input[type=password],input[type=number],input[type=url],input[type=time],select{width:100%;min-height:44px;padding:8px 12px;
 font:inherit;color:inherit;background:var(--in);border:1px solid var(--bd);border-radius:8px}
 .hint{color:var(--mut);font-size:.82rem;margin-top:4px}
 .check{display:flex;align-items:center;gap:8px;margin:0 0 16px;min-height:44px}
@@ -695,6 +785,28 @@ function fmtBytes(n) {
 const form = $('#settings-form');
 if (form) {
   const val = (n, trim) => { const e = form.elements[n]; return !e ? '' : (trim === false ? e.value : e.value.trim()); };
+  const scheduleMode = form.elements.schedule_mode;
+  const intervalValue = form.elements.interval_value;
+  const intervalUnit = form.elements.interval_unit;
+  const scheduleTime = form.elements.schedule_time;
+  const monthlyDay = form.elements.monthly_day;
+  function updateScheduleFields() {
+    const mode = scheduleMode.value;
+    $('#interval-settings').hidden = mode !== 'interval';
+    $('#calendar-settings').hidden = mode === 'interval';
+    $('#monthly-schedule-field').hidden = mode !== 'monthly';
+    intervalValue.required = mode === 'interval';
+    scheduleTime.required = mode !== 'interval';
+    monthlyDay.required = mode === 'monthly';
+    intervalValue.max = intervalUnit.value === 'hours' ? '168' : '10080';
+  }
+  scheduleMode.addEventListener('change', updateScheduleFields);
+  intervalUnit.addEventListener('change', () => {
+    const value = Number(intervalValue.value) || 1;
+    intervalValue.value = intervalUnit.value === 'minutes' ? String(value * 60) : String(Math.max(1, Math.round(value / 60)));
+    updateScheduleFields();
+  });
+  updateScheduleFields();
   $('#show-pw').addEventListener('change', ev => {
     form.querySelectorAll('input[type=password],input[data-pw]').forEach(i => {
       i.type = ev.target.checked ? 'text' : 'password'; i.dataset.pw = '1';
@@ -709,8 +821,12 @@ if (form) {
     const payload = {
       admin_user: val('admin_user'), db_host: val('db_host'), db_port: Number(val('db_port')),
       db_user: val('db_user'), db_name: val('db_name'), central_url: val('central_url'),
-      retention_days: Number(val('retention_days')),
-      interval_seconds: Math.round(Number(val('interval_hours')) * 3600)
+      schedule_mode: val('schedule_mode'),
+      interval_seconds: Math.round(Number(val('interval_value')) * (val('interval_unit') === 'hours' ? 3600 : 60)),
+      schedule_time: val('schedule_time'),
+      monthly_day: Number(val('monthly_day')),
+      database_max_files: Number(val('database_max_files')),
+      application_max_files: Number(val('application_max_files'))
     };
     if (val('age_recipient')) payload.age_recipient = val('age_recipient');
     ['admin_password', 'db_pass', 'agent_token'].forEach(n => { const x = val(n, false); if (x) payload[n] = x; });
@@ -743,6 +859,7 @@ if (form) {
 /* ---------- Dashboard ---------- */
 if (mode === 'dashboard') {
   const STATUS = {success: ['Berhasil', 'ok'], local_only: ['Arsip lokal OK, unggah gagal', 'warn'],
+                  retention_failed: ['Terunggah, rotasi COS gagal', 'warn'],
                   failed: ['Gagal', 'err'], timeout: ['Melebihi batas waktu', 'err'], skipped: ['Dilewati', 'warn']};
   let timer = null;
   function render(s) {
