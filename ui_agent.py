@@ -519,7 +519,18 @@ app = FastAPI(title="SmartGOV Backup Agent", docs_url=None, redoc_url=None, open
 async def security_headers(request: Request, call_next):
     nonce = secrets.token_urlsafe(16)
     request.state.csp_nonce = nonce
-    response = await call_next(request)
+    path_segments = [segment.lower() for segment in request.url.path.split("/") if segment]
+    blocked_segments = {
+        ".git", ".github", ".svn", ".hg", "admin", "cgi-bin",
+        "phpmyadmin", "wp-admin", "wp-content", "wp-includes",
+    }
+    if any(
+        segment in blocked_segments or segment == ".env" or segment.startswith(".env.")
+        for segment in path_segments
+    ):
+        response = JSONResponse(status_code=404, content={"detail": "Not Found"})
+    else:
+        response = await call_next(request)
     response.headers["Content-Security-Policy"] = (
         f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
         "connect-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
@@ -527,6 +538,7 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Cache-Control"] = "no-store"
     return response
 

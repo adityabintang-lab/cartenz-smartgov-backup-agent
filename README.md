@@ -26,6 +26,8 @@ Dashboard: `http://127.0.0.1:25200` (default hanya localhost). Akses remote: SSH
 (`ssh -L 25200:127.0.0.1:25200 server`) atau reverse proxy HTTPS. Untuk membuka ke jaringan:
 `AGENT_BIND_ADDR=0.0.0.0` di `.env` — **hanya** di belakang TLS, karena dashboard memakai HTTP Basic.
 
+Agent juga menolak path probe umum seperti `/.env`, `/.git`, `wp-admin`, dan `cgi-bin` dengan 404 serta mengirim header keamanan. Ini bukan pengganti firewall atau TLS: pertahankan port Agent di localhost bila memungkinkan, batasi akses melalui firewall, dan gunakan HTTPS reverse proxy untuk akses jaringan. Pertahankan access log untuk mendeteksi pemindaian.
+
 Setup pertama membutuhkan **token setup** (dicetak di log container) sehingga orang lain di jaringan tidak bisa
 merebut agent sebelum Anda. Setelah setup, semua perubahan lewat *Pengaturan* di dashboard (butuh login).
 
