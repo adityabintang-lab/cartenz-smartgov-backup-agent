@@ -24,7 +24,9 @@ docker logs cartenz-smartgov-backup-agent                  # salin TOKEN SETUP d
 
 Dashboard: `http://127.0.0.1:25200` (default hanya localhost). Akses remote: SSH tunnel
 (`ssh -L 25200:127.0.0.1:25200 server`) atau reverse proxy HTTPS. Untuk membuka ke jaringan:
-`AGENT_BIND_ADDR=0.0.0.0` di `.env` — **hanya** di belakang TLS. Login dashboard memakai cookie sesi `HttpOnly`, `SameSite=Strict`, dan `Secure`; API juga tetap menerima HTTP Basic untuk kompatibilitas. Session berlaku 8 jam dan hilang saat Agent restart.
+`AGENT_BIND_ADDR=0.0.0.0` di `.env` — utamakan TLS; tanpa TLS, batasi ke jaringan internal/VPN dan firewall ketat. Login dashboard memakai cookie sesi `HttpOnly` dan `SameSite=Strict`; atribut `Secure` dipasang saat akses HTTPS. API juga tetap menerima HTTP Basic untuk kompatibilitas. Session berlaku 8 jam dan hilang saat Agent restart.
+
+Dashboard tetap dapat dipakai melalui HTTP untuk lingkungan yang belum memiliki TLS; pada HTTPS cookie diberi atribut `Secure`, sedangkan pada HTTP atribut tersebut tidak dipasang agar sesi tetap berfungsi. HTTP tidak mengenkripsi password, cookie, maupun data dashboard. Batasi penggunaan HTTP ke jaringan internal/VPN tepercaya dan firewall; gunakan HTTPS bila memungkinkan.
 
 Agent juga menolak path probe umum seperti `/.env`, `/.git`, `wp-admin`, dan `cgi-bin` dengan 404 serta mengirim header keamanan. Ini bukan pengganti firewall atau TLS: pertahankan port Agent di localhost bila memungkinkan, batasi akses melalui firewall, dan gunakan HTTPS reverse proxy untuk akses jaringan. Pertahankan access log untuk mendeteksi pemindaian.
 

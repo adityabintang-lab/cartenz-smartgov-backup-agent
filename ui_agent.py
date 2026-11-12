@@ -634,7 +634,7 @@ def api_login(payload: AdminLoginIn, request: Request):
         value=token,
         max_age=SESSION_TTL,
         httponly=True,
-        secure=True,
+        secure=request.url.scheme == "https",
         samesite="strict",
         path="/",
     )
@@ -652,7 +652,7 @@ def api_logout(request: Request, _user: str = Depends(require_admin)):
     response.delete_cookie(
         key=SESSION_COOKIE,
         path="/",
-        secure=True,
+        secure=request.url.scheme == "https",
         httponly=True,
         samesite="strict",
     )
@@ -906,6 +906,11 @@ function fmtBytes(n) {
 
 /* ---------- Admin login ---------- */
 if (mode === 'login') {
+  const secureContext = window.isSecureContext ||
+    ['localhost', '127.0.0.1', '::1'].includes(location.hostname);
+  if (!secureContext) {
+    $('#transport-warning').hidden = false;
+  }
   $('#login-form').addEventListener('submit', async ev => {
     ev.preventDefault();
     const form = ev.currentTarget;
@@ -1090,6 +1095,9 @@ def login_view() -> str:
     return (
         '<p class="sub">Masuk untuk mengelola backup server ini.</p>'
         '<div id="notice" role="alert" hidden></div>'
+        '<div id="transport-warning" class="banner warn" role="alert" hidden>'
+        'Koneksi ini menggunakan HTTP tanpa enkripsi. Password, cookie sesi, dan data dashboard dapat disadap '
+        'pada jaringan. Gunakan hanya di jaringan internal/VPN tepercaya dan aktifkan HTTPS bila memungkinkan.</div>'
         '<section class="card" style="max-width:460px">'
         '<h2>Login Agent</h2><form id="login-form" autocomplete="on">'
         '<div class="row"><div class="field"><label for="login-user">Username</label>'
