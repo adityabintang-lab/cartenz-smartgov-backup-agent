@@ -125,8 +125,12 @@ def _check_admin_password(cfg: Dict[str, Any], password: str) -> bool:
 
 
 MAX_FAILS, FAIL_WINDOW = 5, 300
+SESSION_TTL = 8 * 60 * 60
+SESSION_COOKIE = "smartgov_agent_session"
 _failures: Dict[str, List[float]] = {}
 _fail_lock = threading.Lock()
+_sessions: Dict[str, tuple[str, float]] = {}
+_session_lock = threading.Lock()
 
 
 def _client_ip(request: Request) -> str:
@@ -154,6 +158,33 @@ def _lockout_clear(key: str) -> None:
         _failures.pop(key, None)
 
 
+def _create_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    now = time.time()
+    with _session_lock:
+        for expired in [key for key, (_, expiry) in _sessions.items() if expiry <= now]:
+            _sessions.pop(expired, None)
+        _sessions[token_hash] = (username, now + SESSION_TTL)
+    return token
+
+
+def _session_username(request: Request) -> Optional[str]:
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if not token:
+        return None
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    with _session_lock:
+        session = _sessions.get(token_hash)
+        if not session:
+            return None
+        username, expires_at = session
+        if expires_at <= time.time():
+            _sessions.pop(token_hash, None)
+            return None
+        return username
+
+
 _basic = HTTPBasic(auto_error=False)
 _UNAUTH = {"WWW-Authenticate": 'Basic realm="SmartGOV Backup Agent", charset="UTF-8"'}
 
@@ -163,6 +194,10 @@ def require_admin(request: Request, credentials: Optional[HTTPBasicCredentials] 
     if not is_configured(cfg):
         raise HTTPException(503, "Agent belum dikonfigurasi.")
     key = "login:" + _client_ip(request)
+    session_user = _session_username(request)
+    if session_user:
+        _lockout_clear(key)
+        return session_user
     _lockout_check(key)
     if credentials is None:  # permintaan awal browser: belum dihitung sebagai percobaan gagal
         raise HTTPException(401, "Autentikasi diperlukan.", headers=_UNAUTH)
@@ -177,8 +212,7 @@ def require_admin(request: Request, credentials: Optional[HTTPBasicCredentials] 
 
 
 def csrf_guard(request: Request) -> None:
-    """Header kustom memaksa preflight CORS, sehingga situs lain tidak bisa memicu aksi
-    memakai kredensial Basic yang tersimpan di browser (CSRF)."""
+    """Header kustom memaksa preflight CORS untuk mencegah request lintas situs."""
     if request.headers.get("x-requested-with") != "XMLHttpRequest":
         raise HTTPException(403, "Permintaan ditolak (header X-Requested-With wajib).")
 
@@ -255,6 +289,13 @@ class SettingsIn(BaseModel):
         except ValueError as exc:
             raise ValueError("gunakan format jam HH:MM (00:00–23:59)") from exc
         return v
+
+
+class AdminLoginIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=1, max_length=128)
 
 
 FIELD_LABELS = {
@@ -572,10 +613,60 @@ def api_setup(payload: SettingsIn, request: Request, x_setup_token: str = Header
     return {"status": "ok"}
 
 
+@app.post("/api/login", dependencies=[Depends(csrf_guard)])
+def api_login(payload: AdminLoginIn, request: Request):
+    cfg = load_config()
+    if not is_configured(cfg):
+        raise HTTPException(503, "Agent belum dikonfigurasi.")
+    key = "login:" + _client_ip(request)
+    _lockout_check(key)
+    user_ok = hmac.compare_digest(payload.username.encode(), str(cfg.get("admin_user", "admin")).encode())
+    pass_ok = _check_admin_password(cfg, payload.password)
+    if not (user_ok and pass_ok):
+        _lockout_fail(key)
+        raise HTTPException(401, "Username atau password tidak valid.")
+
+    _lockout_clear(key)
+    token = _create_session(payload.username)
+    response = JSONResponse({"status": "ok"})
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=token,
+        max_age=SESSION_TTL,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/logout", dependencies=[Depends(csrf_guard)])
+def api_logout(request: Request, _user: str = Depends(require_admin)):
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if token:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with _session_lock:
+            _sessions.pop(token_hash, None)
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+    return response
+
+
 @app.put("/api/config", dependencies=[Depends(csrf_guard)])
 def api_update_config(payload: SettingsIn, _user: str = Depends(require_admin)):
     with _config_lock:
-        save_config(build_config(load_config(), payload))
+        existing = load_config()
+        save_config(build_config(existing, payload))
+        if payload.admin_password or payload.admin_user != existing.get("admin_user", "admin"):
+            with _session_lock:
+                _sessions.clear()
     return {"status": "ok"}
 
 
@@ -779,6 +870,7 @@ async function api(method, url, body, headers) {
                                 body: body === undefined ? undefined : JSON.stringify(body)});
   let data = null;
   try { data = await res.json(); } catch (_) {}
+  if (res.status === 401 && mode === 'dashboard') location.replace('/');
   if (!res.ok) {
     const d = data && data.detail;
     const err = new Error(typeof d === 'string' ? d : 'Permintaan gagal (HTTP ' + res.status + ').');
@@ -810,6 +902,28 @@ function fmtBytes(n) {
   const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return (i ? n.toFixed(1) : n) + ' ' + u[i];
+}
+
+/* ---------- Admin login ---------- */
+if (mode === 'login') {
+  $('#login-form').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    const button = $('#login-btn');
+    busy(button, true, 'Masuk…');
+    notice('', '');
+    try {
+      await api('POST', '/api/login', {
+        username: form.elements.username.value,
+        password: form.elements.password.value
+      });
+      form.elements.password.value = '';
+      location.replace('/');
+    } catch (e) {
+      notice('err', e.message);
+      busy(button, false);
+    }
+  });
 }
 
 /* ---------- Form pengaturan / setup ---------- */
@@ -894,6 +1008,14 @@ if (mode === 'dashboard') {
                   retention_failed: ['Terunggah, rotasi COS gagal', 'warn'],
                   failed: ['Gagal', 'err'], timeout: ['Melebihi batas waktu', 'err'], skipped: ['Dilewati', 'warn']};
   let timer = null;
+  $('#logout-btn').addEventListener('click', async () => {
+    try {
+      await api('POST', '/api/logout');
+      location.replace('/');
+    } catch (e) {
+      notice('err', e.message);
+    }
+  });
   function render(s) {
     const chip = $('#st-last'); chip.textContent = '';
     const last = s.last_run;
@@ -964,10 +1086,27 @@ def setup_view() -> str:
     )
 
 
+def login_view() -> str:
+    return (
+        '<p class="sub">Masuk untuk mengelola backup server ini.</p>'
+        '<div id="notice" role="alert" hidden></div>'
+        '<section class="card" style="max-width:460px">'
+        '<h2>Login Agent</h2><form id="login-form" autocomplete="on">'
+        '<div class="row"><div class="field"><label for="login-user">Username</label>'
+        '<input id="login-user" name="username" type="text" autocomplete="username" required maxlength="32"></div>'
+        '<div class="field"><label for="login-password">Password</label>'
+        '<input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128"></div></div>'
+        '<button type="submit" class="primary" id="login-btn" style="margin-top:16px">Masuk</button>'
+        '</form></section>'
+    )
+
+
 def dashboard_view(cfg: Dict[str, Any]) -> str:
     return (
         '<p class="sub">Backup MariaDB terenkripsi dan sinkronisasi ke Object Storage.</p>'
         '<div id="notice" role="status" aria-live="polite" hidden></div>'
+        '<div class="actions" style="justify-content:flex-end;margin-bottom:12px">'
+        '<button type="button" id="logout-btn">Keluar</button></div>'
         '<div id="warn-key" class="banner warn" role="alert" hidden><strong>Private key enkripsi masih ada di server ini.</strong> '
         "Siapa pun yang menguasai server dapat membuka backup. Salin <code>secrets/age_key.txt</code> ke tempat aman, "
         "hapus dari server, lalu isi “Public key age” di Pengaturan.</div>"
@@ -995,5 +1134,10 @@ def index(request: Request, credentials: Optional[HTTPBasicCredentials] = Depend
     cfg = load_config()
     if not is_configured(cfg):
         return HTMLResponse(render_page(nonce, "setup", "", setup_view()))
+    user = _session_username(request)
+    if user:
+        return HTMLResponse(render_page(nonce, "dashboard", user, dashboard_view(cfg)))
+    if credentials is None:
+        return HTMLResponse(render_page(nonce, "login", "", login_view()))
     user = require_admin(request, credentials)
     return HTMLResponse(render_page(nonce, "dashboard", user, dashboard_view(cfg)))
