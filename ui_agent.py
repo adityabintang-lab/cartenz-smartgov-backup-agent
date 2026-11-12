@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -34,6 +34,7 @@ STATE_FILE = CONFIG_FILE.with_name("backup_state.json")
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "/app/backups"))
 LOG_DIR = Path(os.environ.get("LOG_DIR", "/app/logs"))
 SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/app/secrets"))
+ASSETS_DIR = Path(__file__).parent / "assets"
 BACKUP_SCRIPT = os.environ.get("BACKUP_SCRIPT", "/app/scripts/backup.sh")
 LOG_FILE = LOG_DIR / "backup.log"
 BACKUP_TIMEOUT = int(os.environ.get("BACKUP_TIMEOUT", "21600"))  # 6 jam
@@ -574,7 +575,8 @@ async def security_headers(request: Request, call_next):
         response = await call_next(request)
     response.headers["Content-Security-Policy"] = (
         f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
-        "connect-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+        "connect-src 'self'; img-src 'self' data:; font-src 'self'; form-action 'self'; "
+        "base-uri 'none'; frame-ancestors 'none'"
     )
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -592,6 +594,14 @@ async def _validation_handler(_request: Request, exc: RequestValidationError):
 @app.get("/health")
 def healthcheck():
     return {"status": "ok"}
+
+
+@app.get("/assets/fonts/PlusJakartaSans-VF.ttf")
+def plus_jakarta_sans_font():
+    return FileResponse(
+        ASSETS_DIR / "fonts" / "PlusJakartaSans-VF.ttf",
+        media_type="font/ttf",
+    )
 
 
 @app.post("/api/setup", dependencies=[Depends(csrf_guard)])
@@ -816,17 +826,27 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
 
 
 CSS = """
-:root{color-scheme:dark light;--bg:#0f172a;--card:#1e293b;--bd:#334155;--fg:#f8fafc;--mut:#94a3b8;--in:#0f172a;
+:root{color-scheme:dark;--bg:#0f172a;--card:#1e293b;--bd:#334155;--fg:#f8fafc;--mut:#94a3b8;--in:#0f172a;
 --pri:#2563eb;--link:#60a5fa;--ok:#4ade80;--warn:#fbbf24;--err:#f87171}
-@media (prefers-color-scheme:light){:root{--bg:#f1f5f9;--card:#fff;--bd:#cbd5e1;--fg:#0f172a;--mut:#475569;
+@media (prefers-color-scheme:light){:root:not([data-theme]){color-scheme:light;--bg:#f1f5f9;--card:#fff;--bd:#cbd5e1;--fg:#0f172a;--mut:#475569;
 --in:#fff;--link:#1d4ed8;--ok:#15803d;--warn:#b45309;--err:#b91c1c}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0f172a;--card:#1e293b;--bd:#334155;--fg:#f8fafc;--mut:#94a3b8;--in:#0f172a;
+--pri:#2563eb;--link:#60a5fa;--ok:#4ade80;--warn:#fbbf24;--err:#f87171}
+:root[data-theme="light"]{color-scheme:light;--bg:#f1f5f9;--card:#fff;--bd:#cbd5e1;--fg:#0f172a;--mut:#475569;
+--in:#fff;--link:#1d4ed8;--ok:#15803d;--warn:#b45309;--err:#b91c1c}
+@font-face{font-family:"Plus Jakarta Sans";src:url("/assets/fonts/PlusJakartaSans-VF.ttf") format("truetype");
+font-style:normal;font-weight:200 800;font-display:swap}
 *,*::before,*::after{box-sizing:border-box}
 [hidden]{display:none!important}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 "Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 .wrap{max-width:880px;margin:0 auto;padding:24px 16px 64px}
-h1{font-size:1.5rem;margin:0 0 4px}.sub{color:var(--mut);margin:0 0 20px}
+h1{font-size:1.5rem;margin:0}.page-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
+.header-actions{display:flex;align-items:center;gap:8px}
+.sub{color:var(--mut);margin:0 0 20px}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:20px;margin-bottom:16px}
 .card h2{font-size:1.05rem;margin:0 0 12px}
+.login-card{max-width:440px;margin:clamp(24px,8vh,80px) auto;padding:24px}
+.login-form .row{grid-template-columns:minmax(0,1fr);gap:16px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:16px}
 .k{color:var(--mut);font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
 .v{font-weight:600;word-break:break-word}
@@ -844,8 +864,14 @@ font:inherit;color:inherit;background:var(--in);border:1px solid var(--bd);borde
 .check{display:flex;align-items:center;gap:8px;margin:0 0 16px;min-height:44px}
 .check input{width:20px;height:20px}
 button{min-height:44px;padding:8px 16px;font:inherit;color:inherit;background:transparent;border:1px solid var(--bd);
-border-radius:8px;cursor:pointer}
+border-radius:8px;cursor:pointer;transition:background-color .15s ease,border-color .15s ease,transform .15s ease}
 button.primary{background:var(--pri);border-color:var(--pri);color:#fff;font-weight:600}
+button.primary.login-submit{width:100%;min-height:48px;margin-top:20px;border-radius:10px;font-weight:700}
+button.primary.login-submit:hover{filter:brightness(1.08);transform:translateY(-1px)}
+button.logout-btn{min-height:40px;padding:7px 16px;border-color:var(--bd);border-radius:10px;color:var(--mut);font-weight:600}
+button.logout-btn:hover{color:var(--fg);background:var(--card);border-color:var(--link)}
+button.theme-btn{min-height:40px;padding:7px 12px;border-color:var(--bd);border-radius:10px;color:var(--fg);font-weight:600}
+button.theme-btn:hover{background:var(--card);border-color:var(--link)}
 button:disabled{opacity:.6;cursor:not-allowed}
 :focus-visible{outline:3px solid var(--link);outline-offset:2px}
 .scroll{overflow-x:auto}
@@ -854,6 +880,7 @@ th,td{text-align:left;padding:8px;border-bottom:1px solid var(--bd);white-space:
 pre.log{max-height:320px;overflow:auto;margin:0;padding:12px;background:var(--in);border:1px solid var(--bd);
 border-radius:8px;font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
 details>summary{cursor:pointer;font-weight:600;min-height:44px;display:flex;align-items:center}
+@media(max-width:420px){.page-header{gap:8px;flex-wrap:wrap}h1{font-size:1.25rem}.login-card{padding:18px}}
 """
 
 JS = r"""
@@ -862,6 +889,31 @@ JS = r"""
 const $ = (s, r = document) => r.querySelector(s);
 const mode = document.body.dataset.mode;
 let refresh = () => {};  // diisi oleh blok dashboard
+
+const themeToggle = $('#theme-toggle');
+if (themeToggle) {
+  const systemTheme = window.matchMedia('(prefers-color-scheme: light)');
+  const currentTheme = () => document.documentElement.dataset.theme ||
+    (systemTheme.matches ? 'light' : 'dark');
+  const updateThemeLabel = () => {
+    const dark = currentTheme() === 'dark';
+    themeToggle.textContent = dark ? 'Mode terang' : 'Mode gelap';
+  };
+  themeToggle.addEventListener('click', () => {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    updateThemeLabel();
+    try {
+      localStorage.setItem('agent-theme', next);
+    } catch (e) {
+      console.warn('Pilihan tema tidak dapat disimpan di browser.', e);
+    }
+  });
+  systemTheme.addEventListener('change', () => {
+    if (!document.documentElement.dataset.theme) updateThemeLabel();
+  });
+  updateThemeLabel();
+}
 
 async function api(method, url, body, headers) {
   const h = Object.assign({'X-Requested-With': 'XMLHttpRequest'}, headers || {});
@@ -1074,9 +1126,15 @@ def render_page(nonce: str, mode: str, user: str, inner: str) -> str:
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="color-scheme" content="dark light"><meta name="robots" content="noindex,nofollow">'
         "<title>SmartGOV Backup Agent</title>"
+        f'<script nonce="{nonce}">try{{const theme=localStorage.getItem("agent-theme");'
+        'if(theme==="light"||theme==="dark")document.documentElement.dataset.theme=theme;}'
+        'catch(e){console.warn("Pilihan tema tersimpan tidak dapat dibaca.",e);}</script>'
         f'<style nonce="{nonce}">{CSS}</style></head>'
         f'<body data-mode="{esc(mode)}" data-user="{esc(user)}"><main class="wrap">'
-        "<h1>SmartGOV Backup Agent</h1>"
+        '<header class="page-header"><h1>SmartGOV Backup Agent</h1>'
+        '<div class="header-actions"><button type="button" class="theme-btn" id="theme-toggle"></button>'
+        + ('<button type="button" class="logout-btn" id="logout-btn">Keluar</button>' if mode == "dashboard" else "")
+        + "</div></header>"
         + inner
         + "<noscript><p class=\"banner err\">Dashboard ini memerlukan JavaScript.</p></noscript>"
         f'</main><script nonce="{nonce}">{JS}</script></body></html>'
@@ -1098,13 +1156,13 @@ def login_view() -> str:
         '<div id="transport-warning" class="banner warn" role="alert" hidden>'
         'Koneksi ini menggunakan HTTP tanpa enkripsi. Password, cookie sesi, dan data dashboard dapat disadap '
         'pada jaringan. Gunakan hanya di jaringan internal/VPN tepercaya dan aktifkan HTTPS bila memungkinkan.</div>'
-        '<section class="card" style="max-width:460px">'
-        '<h2>Login Agent</h2><form id="login-form" autocomplete="on">'
+        '<section class="card login-card">'
+        '<h2>Masuk ke dashboard</h2><form id="login-form" class="login-form" autocomplete="on">'
         '<div class="row"><div class="field"><label for="login-user">Username</label>'
         '<input id="login-user" name="username" type="text" autocomplete="username" required maxlength="32"></div>'
         '<div class="field"><label for="login-password">Password</label>'
         '<input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128"></div></div>'
-        '<button type="submit" class="primary" id="login-btn" style="margin-top:16px">Masuk</button>'
+        '<button type="submit" class="primary login-submit" id="login-btn">Masuk</button>'
         '</form></section>'
     )
 
@@ -1113,8 +1171,6 @@ def dashboard_view(cfg: Dict[str, Any]) -> str:
     return (
         '<p class="sub">Backup MariaDB terenkripsi dan sinkronisasi ke Object Storage.</p>'
         '<div id="notice" role="status" aria-live="polite" hidden></div>'
-        '<div class="actions" style="justify-content:flex-end;margin-bottom:12px">'
-        '<button type="button" id="logout-btn">Keluar</button></div>'
         '<div id="warn-key" class="banner warn" role="alert" hidden><strong>Private key enkripsi masih ada di server ini.</strong> '
         "Siapa pun yang menguasai server dapat membuka backup. Salin <code>secrets/age_key.txt</code> ke tempat aman, "
         "hapus dari server, lalu isi “Public key age” di Pengaturan.</div>"

@@ -23,6 +23,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
 COPY ui_agent.py /app/ui_agent.py
+COPY assets/ /app/assets/
 COPY scripts/ /app/scripts/
 COPY entrypoint.sh /app/entrypoint.sh
 
