@@ -10,6 +10,7 @@ services:
       - "${AGENT_BIND_ADDR:-127.0.0.1}:25200:25200"
     environment:
       APP_SOURCE_ROOT: /backup_sources
+      BACKUP_TIMEOUT: ${BACKUP_TIMEOUT:-86400}
     volumes:
       - ./agent_data:/app/data
       - ./backups:/app/backups

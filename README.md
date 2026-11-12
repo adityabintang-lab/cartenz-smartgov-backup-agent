@@ -70,6 +70,16 @@ Jadwal harian dan bulanan mengikuti zona waktu lokal server. Backup kalender per
 
 Batas awal per Agent adalah **7 arsip database** dan **2 arsip aplikasi**, baik di disk Agent maupun di COS. Batas dapat diubah di Pengaturan Agent. File lokal tertua dihapus setelah arsip baru dibuat; file COS tertua dihapus setelah arsip baru berhasil diunggah. Jika upload atau penghapusan di COS gagal, kegagalan ditampilkan di log dan file lokal tetap tersedia. Status dashboard membedakan kegagalan upload dari kegagalan rotasi COS. Berikan kredensial COS izin menghapus objek pada prefix backup agar rotasi jarak jauh berfungsi.
 
+Arsip di atas 4 GiB diunggah sebagai multipart dalam bagian 64 MiB (ukuran bagian menyesuaikan untuk arsip yang sangat besar). Bagian yang gagal dicoba ulang dan unggahan multipart dibatalkan bila proses gagal; arsip lokal tetap tersedia. Agent memberi proses backup waktu maksimum 24 jam secara default. Atur `BACKUP_TIMEOUT` di `.env` lebih tinggi jika kecepatan jaringan membuat transfer memerlukan waktu lebih lama. Sebagai perlindungan tambahan jika container mati paksa, aktifkan aturan siklus hidup COS untuk menghapus multipart upload yang tidak selesai.
+
+Untuk menguji upload arsip lokal tanpa menjalankan ulang kompresi/enkripsi:
+
+```bash
+docker exec cartenz-smartgov-backup-agent python3 /app/scripts/cos.py upload application "/app/backups/application/NAMA_FILE.tar.gz.age"
+```
+
+Ganti kategori/path sesuai arsip. Perintah ini mengunggah ke COS tanpa menjalankan retensi; nama file yang sama menargetkan objek COS yang sama.
+
 Arsip gabungan dari versi lama yang berada langsung di root `backups/` lokal atau `backups/<daerah>/` COS dipertahankan dan tidak ikut rotasi kategori otomatis.
 
 ## Enkripsi & pemulihan

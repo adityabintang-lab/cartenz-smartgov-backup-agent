@@ -37,7 +37,7 @@ SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/app/secrets"))
 ASSETS_DIR = Path(__file__).parent / "assets"
 BACKUP_SCRIPT = os.environ.get("BACKUP_SCRIPT", "/app/scripts/backup.sh")
 LOG_FILE = LOG_DIR / "backup.log"
-BACKUP_TIMEOUT = int(os.environ.get("BACKUP_TIMEOUT", "21600"))  # 6 jam
+BACKUP_TIMEOUT = int(os.environ.get("BACKUP_TIMEOUT", "86400"))  # 24 jam
 SCHEDULER_DELAY = int(os.environ.get("SCHEDULER_DELAY", "20"))
 MIN_INTERVAL, MAX_INTERVAL = 60, 604800
 
