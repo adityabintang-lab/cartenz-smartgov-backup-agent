@@ -34,6 +34,7 @@ STATE_FILE = CONFIG_FILE.with_name("backup_state.json")
 BACKUP_DIR = Path(os.environ.get("BACKUP_DIR", "/app/backups"))
 LOG_DIR = Path(os.environ.get("LOG_DIR", "/app/logs"))
 SECRETS_DIR = Path(os.environ.get("SECRETS_DIR", "/app/secrets"))
+APP_SOURCE_ROOT = Path(os.environ.get("APP_SOURCE_ROOT", "/backup_sources"))
 ASSETS_DIR = Path(__file__).parent / "assets"
 BACKUP_SCRIPT = os.environ.get("BACKUP_SCRIPT", "/app/scripts/backup.sh")
 LOG_FILE = LOG_DIR / "backup.log"
@@ -237,6 +238,7 @@ class SettingsIn(BaseModel):
     db_pass: Optional[str] = Field(default=None, max_length=256)
     db_name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_$]+$")
     application_source_path: str = Field(default="", max_length=1024)
+    application_source_selection: Optional[List[str]] = Field(default=None, max_length=5000)
     central_url: str = Field(min_length=1, max_length=300)
     agent_token: Optional[str] = Field(default=None, max_length=512)
     age_recipient: Optional[str] = Field(default=None, pattern=r"^age1[a-z0-9]{58}$")
@@ -273,14 +275,12 @@ class SettingsIn(BaseModel):
     @field_validator("application_source_path")
     @classmethod
     def _valid_application_source_path(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            return ""
-        if v.startswith("/") or "\\" in v or _CTRL.search(v):
-            raise ValueError("gunakan path relatif di bawah root folder yang di-mount")
-        if any(part in ("", ".", "..") for part in v.split("/")):
-            raise ValueError("path tidak boleh keluar dari root folder yang di-mount")
-        return v
+        return validate_application_source_path(v)
+
+    @field_validator("application_source_selection")
+    @classmethod
+    def _valid_application_source_selection(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        return validate_application_source_selection(value)
 
     @field_validator("schedule_time")
     @classmethod
@@ -290,6 +290,70 @@ class SettingsIn(BaseModel):
         except ValueError as exc:
             raise ValueError("gunakan format jam HH:MM (00:00–23:59)") from exc
         return v
+
+
+class ApplicationPathCheckIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    application_source_path: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("application_source_path")
+    @classmethod
+    def _valid_application_source_path(cls, v: str) -> str:
+        return validate_application_source_path(v)
+
+
+class ApplicationDirectoryBrowseIn(ApplicationPathCheckIn):
+    relative_path: str = Field(default="", max_length=1024)
+    offset: int = Field(default=0, ge=0, le=1_000_000)
+
+    @field_validator("relative_path")
+    @classmethod
+    def _valid_relative_path(cls, value: str) -> str:
+        return validate_application_relative_path(value)
+
+
+def validate_application_source_path(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("masukkan subfolder aplikasi yang akan diperiksa")
+    if value.startswith("/") or "\\" in value or _CTRL.search(value):
+        raise ValueError("gunakan path relatif di bawah root folder yang di-mount")
+    if any(part in ("", ".", "..") for part in value.split("/")):
+        raise ValueError("path tidak boleh keluar dari root folder yang di-mount")
+    return value
+
+
+def validate_application_relative_path(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) > 1024:
+        raise ValueError("path relatif direktori maksimal 1024 karakter")
+    if value.startswith("/") or "\\" in value or _CTRL.search(value):
+        raise ValueError("path relatif direktori tidak valid")
+    if any(part in ("", ".", "..") for part in value.split("/")):
+        raise ValueError("path relatif tidak boleh keluar dari direktori aplikasi")
+    return value
+
+
+def validate_application_source_selection(value: Optional[List[str]]) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if len(value) > 5000:
+        raise ValueError("pilihan maksimal 5000 item")
+    normalized = []
+    for path in value:
+        if not isinstance(path, str):
+            raise ValueError("pilihan direktori tidak valid")
+        if path == ".":
+            if len(value) != 1:
+                raise ValueError("pilihan seluruh direktori tidak boleh digabung dengan item lain")
+        elif not validate_application_relative_path(path):
+            raise ValueError("pilihan direktori tidak valid")
+        if path in normalized:
+            raise ValueError("pilihan direktori tidak boleh ganda")
+        normalized.append(path)
+    return normalized
 
 
 class AdminLoginIn(BaseModel):
@@ -303,6 +367,7 @@ FIELD_LABELS = {
     "setup_token": "Token setup", "admin_user": "Username admin", "admin_password": "Password admin",
     "db_host": "DB host", "db_port": "DB port", "db_user": "DB user", "db_pass": "DB password",
     "db_name": "Database untuk uji koneksi", "application_source_path": "Subfolder aplikasi",
+    "application_source_selection": "Pilihan file aplikasi",
     "central_url": "URL server pusat", "agent_token": "Agent API token",
     "age_recipient": "Public key age", "interval_seconds": "Interval backup",
     "schedule_time": "Waktu backup", "monthly_day": "Tanggal backup bulanan",
@@ -360,6 +425,8 @@ def build_config(existing: Dict[str, Any], data: SettingsIn) -> Dict[str, Any]:
         schedule_time=data.schedule_time, monthly_day=data.monthly_day,
         database_max_files=data.database_max_files, application_max_files=data.application_max_files,
     )
+    if data.application_source_selection is not None:
+        cfg["application_source_selection"] = data.application_source_selection
     if data.admin_password:
         cfg["admin_password_hash"] = hash_password(data.admin_password)
     if data.db_pass is not None:
@@ -710,6 +777,107 @@ def api_test_db(_user: str = Depends(require_admin)):
     return {"ok": False, "message": (proc.stderr.strip() or "Koneksi gagal.")[:300]}
 
 
+@app.post("/api/check-application-dir", dependencies=[Depends(csrf_guard)])
+def api_check_application_dir(
+    payload: ApplicationPathCheckIn,
+    _user: str = Depends(require_admin),
+):
+    try:
+        _resolve_application_directory(payload.application_source_path, "")
+    except HTTPException as exc:
+        return {"ok": False, "message": str(exc.detail)}
+    return {"ok": True, "message": "Direktori tersedia dan dapat dibaca oleh Agent."}
+
+
+@app.post("/api/application-directory", dependencies=[Depends(csrf_guard)])
+def api_application_directory(
+    payload: ApplicationDirectoryBrowseIn,
+    _user: str = Depends(require_admin),
+):
+    _, directory = _resolve_application_directory(payload.application_source_path, payload.relative_path)
+    entries = []
+    offset = payload.offset
+    has_more = False
+    position = 0
+    try:
+        with os.scandir(directory) as iterator:
+            for entry in iterator:
+                try:
+                    is_link = entry.is_symlink()
+                    is_directory = entry.is_dir(follow_symlinks=False)
+                    is_file = entry.is_file(follow_symlinks=False)
+                    if position < offset:
+                        position += 1
+                        continue
+                    if len(entries) == 100:
+                        has_more = True
+                        break
+                    kind = "link" if is_link else "directory" if is_directory else "file" if is_file else "other"
+                    entry_path = f"{payload.relative_path}/{entry.name}".lstrip("/")
+                    name_is_safe = (
+                        len(entry_path) <= 1024
+                        and not _CTRL.search(entry.name)
+                        and "\\" not in entry.name
+                    )
+                    access_mode = os.R_OK | (os.X_OK if is_directory else 0)
+                    readable = kind in ("directory", "file") and os.access(entry.path, access_mode)
+                    entries.append({
+                        "name": entry.name,
+                        "path": entry_path,
+                        "kind": kind,
+                        "size": entry.stat(follow_symlinks=False).st_size if is_file else None,
+                        "selectable": kind in ("directory", "file") and name_is_safe and readable,
+                        "navigable": is_directory and name_is_safe and readable,
+                        "readable": readable,
+                    })
+                    position += 1
+                except FileNotFoundError:
+                    continue
+    except OSError as exc:
+        raise HTTPException(status_code=403, detail=f"Tidak dapat membaca isi direktori ({type(exc).__name__}).") from exc
+    return {
+        "relative_path": payload.relative_path,
+        "offset": offset,
+        "next_offset": offset + len(entries),
+        "has_more": has_more,
+        "entries": entries,
+    }
+
+
+def _resolve_application_directory(source_subpath: str, relative_path: str) -> tuple[Path, Path]:
+    try:
+        root = APP_SOURCE_ROOT.resolve(strict=True)
+        base = (root / source_subpath).resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Direktori tidak ditemukan di dalam root sumber yang di-mount.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=403, detail=f"Tidak dapat memeriksa direktori ({type(exc).__name__}).") from exc
+    try:
+        base.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Direktori mengarah ke luar root sumber yang di-mount.") from exc
+    if base == root:
+        raise HTTPException(status_code=400, detail="Pilih subfolder di dalam root sumber yang di-mount.")
+    if not base.is_dir():
+        raise HTTPException(status_code=400, detail="Path yang dimasukkan bukan direktori.")
+    if not os.access(base, os.R_OK | os.X_OK):
+        raise HTTPException(status_code=403, detail="Direktori tidak dapat dibaca oleh Agent.")
+    try:
+        directory = (base / relative_path).resolve(strict=True) if relative_path else base
+        directory.relative_to(base)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Subfolder yang diminta tidak ditemukan.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Subfolder mengarah ke luar direktori aplikasi.") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=403, detail=f"Tidak dapat memeriksa subfolder ({type(exc).__name__}).") from exc
+    if not directory.is_dir():
+        raise HTTPException(status_code=400, detail="Path yang dipilih bukan direktori.")
+    if not os.access(directory, os.R_OK | os.X_OK):
+        raise HTTPException(status_code=403, detail="Subfolder tidak dapat dibaca oleh Agent.")
+    return base, directory
+
+
 # --------------------------------------------------------------------------- #
 # Tampilan (HTML dirender server-side; JS hanya untuk aksi & polling status)
 # --------------------------------------------------------------------------- #
@@ -737,6 +905,10 @@ def field(fid: str, label: str, *, type: str = "text", value: Any = "", required
 
 def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
     keep = "Kosongkan jika tidak diubah"
+    application_selection = cfg.get("application_source_selection")
+    if not isinstance(application_selection, list):
+        application_selection = ["."]
+    application_selection_json = esc(json.dumps(application_selection, ensure_ascii=False))
     interval = _interval(cfg)
     if interval % 3600 == 0:
         interval_value, interval_unit = interval // 3600, "hours"
@@ -754,6 +926,32 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
     pw_hint = "Minimal 12 karakter, ASCII." if setup else keep + ". Minimal 12 karakter, ASCII."
     confirm = field("admin_password2", "Ulangi password admin", type="password", autocomplete="new-password",
                     required=setup)
+    if setup:
+        application_directory_controls = (
+            '<div class="col-12"><span class="form-text">Pemeriksaan dan pemilihan isi direktori tersedia setelah setup.</span></div>'
+        )
+        application_directory_browser = ""
+    else:
+        application_directory_controls = (
+            '<div class="col-12"><button class="btn btn-outline-secondary" id="check-application-dir" type="button">Cek direktori</button>'
+            + ' <span class="ms-2" id="application-dir-result" role="status" aria-live="polite"></span></div>'
+        )
+        application_directory_browser = (
+            '<div class="col-12" id="application-directory-browser" hidden>'
+            '<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">'
+            '<div><strong>Isi direktori</strong><div class="form-text" id="application-directory-breadcrumb"></div></div>'
+            '<button class="btn btn-sm btn-outline-danger" id="clear-application-selection" type="button">Hapus semua pilihan</button></div>'
+            '<div class="table-responsive"><table class="table table-sm table-hover align-middle">'
+            '<thead><tr><th>Pilih</th><th>Nama</th><th>Tipe</th><th>Ukuran</th></tr></thead>'
+            '<tbody id="application-directory-items"><tr><td colspan="4" class="text-muted">Memuat isi direktori…</td></tr></tbody></table></div>'
+            '<div class="d-flex justify-content-between align-items-center gap-2">'
+            '<button class="btn btn-sm btn-outline-secondary" id="application-directory-prev" type="button">Sebelumnya</button>'
+            '<span class="form-text" id="application-directory-page"></span>'
+            '<button class="btn btn-sm btn-outline-secondary" id="application-directory-next" type="button">Berikutnya</button></div>'
+            '<div class="form-text mt-2" id="application-selection-summary" aria-live="polite"></div>'
+            '<ul class="mb-0 mt-1" id="application-selected-items"></ul>'
+            '</div>'
+        )
     return (
         '<form id="settings-form" method="post" action="/" autocomplete="off">' + token
         + '<fieldset class="mb-4"><legend>1. Akun admin dashboard</legend><div class="row g-3">'
@@ -776,6 +974,9 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
         + field("application_source_path", "Subfolder aplikasi", value=cfg.get("application_source_path", ""),
                 placeholder="revenue",
                 hint="Path relatif di bawah root host yang di-mount read-only. Kosongkan jika tidak ingin backup berkas aplikasi.")
+        + application_directory_controls
+        + f'<input type="hidden" id="application-source-selection" value="{application_selection_json}">'
+        + application_directory_browser
         + "</div></fieldset>"
         + '<fieldset class="mb-4"><legend>4. Server pusat</legend><div class="row g-3">'
         + field("central_url", "Central Gateway URL", type="url", value=cfg.get("central_url", ""), required=True,
@@ -976,6 +1177,13 @@ if (form) {
   const intervalUnit = form.elements.interval_unit;
   const scheduleTime = form.elements.schedule_time;
   const monthlyDay = form.elements.monthly_day;
+  const applicationBrowser = $('#application-directory-browser');
+  const applicationItems = $('#application-directory-items');
+  let applicationSelection = JSON.parse($('#application-source-selection').value || '[]');
+  let applicationBrowsePath = '';
+  let applicationBrowseOffset = 0;
+  let applicationBrowseEntries = [];
+  let previousApplicationPath = val('application_source_path');
   function updateScheduleFields() {
     const mode = scheduleMode.value;
     $('#interval-settings').hidden = mode !== 'interval';
@@ -986,6 +1194,147 @@ if (form) {
     monthlyDay.required = mode === 'monthly';
     intervalValue.max = intervalUnit.value === 'hours' ? '168' : '10080';
   }
+  function selectedByAncestor(path) {
+    return applicationSelection.some(item => item === '.' || (item !== path && path.startsWith(item + '/')));
+  }
+  function updateApplicationSelectionSummary() {
+    const summary = $('#application-selection-summary');
+    const list = $('#application-selected-items');
+    if (!summary || !list) return;
+    summary.textContent = applicationSelection.includes('.')
+      ? 'Seluruh isi direktori dipilih; semua file dan subfolder di dalamnya akan ikut dibackup.'
+      : applicationSelection.length
+        ? applicationSelection.length + ' item dipilih. Folder terpilih mencakup semua isinya secara rekursif.'
+        : 'Tidak ada item terpilih; file aplikasi tidak akan ikut dibackup.';
+    list.textContent = '';
+    applicationSelection.forEach(path => {
+      const item = document.createElement('li');
+      const label = document.createElement('span');
+      label.textContent = path === '.' ? 'Seluruh isi direktori' : path;
+      item.append(label);
+      if (path !== '.') {
+        const remove = document.createElement('button');
+        remove.className = 'btn btn-sm btn-link';
+        remove.type = 'button';
+        remove.textContent = 'Hapus pilihan';
+        remove.onclick = () => changeApplicationSelection(path, false);
+        item.append(' ', remove);
+      }
+      list.append(item);
+    });
+  }
+  function changeApplicationSelection(path, checked) {
+    if (checked) {
+      if (applicationSelection.includes('.')) return;
+      applicationSelection = applicationSelection.filter(item => item !== path && !item.startsWith(path + '/'));
+      applicationSelection.push(path);
+    } else {
+      applicationSelection = applicationSelection.filter(item => item !== path && !item.startsWith(path + '/'));
+    }
+    updateApplicationSelectionSummary();
+    renderApplicationDirectoryItems();
+  }
+  function renderApplicationBreadcrumbs() {
+    const nav = $('#application-directory-breadcrumb');
+    nav.textContent = '';
+    const root = document.createElement('button');
+    root.className = 'btn btn-sm btn-link p-0';
+    root.type = 'button';
+    root.textContent = val('application_source_path');
+    root.onclick = () => loadApplicationDirectory(0, '');
+    nav.append(root);
+    let path = '';
+    applicationBrowsePath.split('/').filter(Boolean).forEach(part => {
+      nav.append(document.createTextNode(' / '));
+      path = path ? path + '/' + part : part;
+      const button = document.createElement('button');
+      button.className = 'btn btn-sm btn-link p-0';
+      button.type = 'button';
+      button.textContent = part;
+      const target = path;
+      button.onclick = () => loadApplicationDirectory(0, target);
+      nav.append(button);
+    });
+  }
+  function renderApplicationDirectoryItems() {
+    applicationItems.textContent = '';
+    if (!applicationBrowseEntries.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 4;
+      cell.className = 'text-muted';
+      cell.textContent = 'Direktori ini kosong.';
+      row.append(cell);
+      applicationItems.append(row);
+      return;
+    }
+    applicationBrowseEntries.forEach(entry => {
+      const row = document.createElement('tr');
+      const chooseCell = document.createElement('td');
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'form-check-input';
+      checkbox.setAttribute('aria-label', 'Pilih ' + entry.name);
+      const selected = applicationSelection.includes(entry.path);
+      const inherited = selectedByAncestor(entry.path);
+      const descendants = entry.kind === 'directory' &&
+        applicationSelection.some(item => item !== entry.path && item.startsWith(entry.path + '/'));
+      checkbox.checked = selected || inherited;
+      checkbox.indeterminate = !checkbox.checked && descendants;
+      checkbox.disabled = !entry.selectable || inherited;
+      checkbox.onchange = () => changeApplicationSelection(entry.path, checkbox.checked);
+      chooseCell.append(checkbox);
+
+      const nameCell = document.createElement('td');
+      if (entry.kind === 'directory' && entry.navigable) {
+        const open = document.createElement('button');
+        open.className = 'btn btn-link p-0 text-start';
+        open.type = 'button';
+        open.textContent = entry.name + '/';
+        open.onclick = () => loadApplicationDirectory(0, entry.path);
+        nameCell.append(open);
+      } else {
+        nameCell.textContent = entry.name;
+      }
+      const typeCell = document.createElement('td');
+      typeCell.textContent = entry.kind === 'directory' ? 'Folder (rekursif)'
+        : entry.kind === 'file' ? 'File'
+        : entry.kind === 'link' ? 'Tautan (tidak didukung)' : 'Tipe tidak didukung';
+      if (!entry.readable && entry.kind !== 'link') typeCell.textContent += ' — tidak dapat dibaca';
+      const sizeCell = document.createElement('td');
+      sizeCell.textContent = entry.kind === 'file' ? formatBytes(entry.size) : '—';
+      row.append(chooseCell, nameCell, typeCell, sizeCell);
+      applicationItems.append(row);
+    });
+  }
+  async function loadApplicationDirectory(offset, relativePath) {
+    if (relativePath !== undefined) applicationBrowsePath = relativePath;
+    try {
+      const result = await api('POST', '/api/application-directory', {
+        application_source_path: val('application_source_path'),
+        relative_path: applicationBrowsePath,
+        offset
+      });
+      applicationBrowseOffset = result.offset;
+      applicationBrowseEntries = result.entries || [];
+      renderApplicationBreadcrumbs();
+      renderApplicationDirectoryItems();
+      $('#application-directory-prev').disabled = applicationBrowseOffset === 0;
+      $('#application-directory-next').hidden = !result.has_more;
+      $('#application-directory-page').textContent = 'Halaman ' + (Math.floor(applicationBrowseOffset / 100) + 1);
+      updateApplicationSelectionSummary();
+    } catch (e) {
+      applicationItems.textContent = '';
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 4;
+      cell.className = 'text-danger';
+      cell.textContent = 'Gagal memuat isi direktori: ' + e.message;
+      row.append(cell);
+      applicationItems.append(row);
+      $('#application-directory-page').textContent = '';
+    }
+  }
   scheduleMode.addEventListener('change', updateScheduleFields);
   intervalUnit.addEventListener('change', () => {
     const value = Number(intervalValue.value) || 1;
@@ -993,6 +1342,54 @@ if (form) {
     updateScheduleFields();
   });
   updateScheduleFields();
+  if (applicationBrowser) {
+    updateApplicationSelectionSummary();
+    form.elements.application_source_path.addEventListener('input', () => {
+      const currentPath = val('application_source_path');
+      if (currentPath !== previousApplicationPath) {
+        previousApplicationPath = currentPath;
+        applicationSelection = [];
+        applicationBrowser.hidden = true;
+        $('#application-dir-result').textContent = 'Path berubah; cek ulang dan pilih isi direktori.';
+        updateApplicationSelectionSummary();
+      }
+    });
+    $('#check-application-dir').addEventListener('click', async ev => {
+      const button = ev.currentTarget;
+      const result = $('#application-dir-result');
+      busy(button, true, 'Memeriksa…');
+      try {
+        const check = await api('POST', '/api/check-application-dir', {
+          application_source_path: val('application_source_path')
+        });
+        result.textContent = check.message;
+        result.className = 'ms-2 ' + (check.ok ? 'text-success' : 'text-danger');
+        if (check.ok) {
+          applicationBrowser.hidden = false;
+          applicationBrowsePath = '';
+          await loadApplicationDirectory(0, '');
+        } else {
+          applicationBrowser.hidden = true;
+        }
+      } catch (e) {
+        result.textContent = e.message;
+        result.className = 'ms-2 text-danger';
+        applicationBrowser.hidden = true;
+      }
+      busy(button, false);
+    });
+    $('#application-directory-prev').addEventListener('click', () => {
+      loadApplicationDirectory(Math.max(0, applicationBrowseOffset - 100));
+    });
+    $('#application-directory-next').addEventListener('click', () => {
+      loadApplicationDirectory(applicationBrowseOffset + 100);
+    });
+    $('#clear-application-selection').addEventListener('click', () => {
+      applicationSelection = [];
+      updateApplicationSelectionSummary();
+      renderApplicationDirectoryItems();
+    });
+  }
   $('#show-pw').addEventListener('change', ev => {
     form.querySelectorAll('input[type=password],input[data-pw]').forEach(i => {
       i.type = ev.target.checked ? 'text' : 'password'; i.dataset.pw = '1';
@@ -1007,7 +1404,9 @@ if (form) {
     const payload = {
       admin_user: val('admin_user'), db_host: val('db_host'), db_port: Number(val('db_port')),
       db_user: val('db_user'), db_name: val('db_name'),
-      application_source_path: val('application_source_path'), central_url: val('central_url'),
+      application_source_path: val('application_source_path'),
+      application_source_selection: applicationSelection,
+      central_url: val('central_url'),
       schedule_mode: val('schedule_mode'),
       interval_seconds: Math.round(Number(val('interval_value')) * (val('interval_unit') === 'hours' ? 3600 : 60)),
       schedule_time: val('schedule_time'),
@@ -1096,6 +1495,24 @@ if (mode === 'dashboard') {
     const btn = ev.currentTarget; busy(btn, true, 'Menguji…');
     try { const r = await api('POST', '/api/test-db'); notice(r.ok ? 'ok' : 'err', r.message); }
     catch (e) { notice('err', e.message); }
+    busy(btn, false);
+  });
+  $('#check-application-dir').addEventListener('click', async ev => {
+    const btn = ev.currentTarget;
+    const result = $('#application-dir-result');
+    const path = form.elements.application_source_path.value.trim();
+    result.textContent = '';
+    busy(btn, true, 'Memeriksa…');
+    try {
+      const response = await api('POST', '/api/check-application-dir', {
+        application_source_path: path
+      });
+      result.textContent = response.message;
+      result.className = 'ms-2 ' + (response.ok ? 'text-success' : 'text-danger');
+    } catch (e) {
+      result.textContent = e.message;
+      result.className = 'ms-2 text-danger';
+    }
     busy(btn, false);
   });
   refresh();

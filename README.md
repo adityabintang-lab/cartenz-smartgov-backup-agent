@@ -9,6 +9,8 @@ curl -fsSLO https://raw.githubusercontent.com/adityabintang-lab/cartenz-smartgov
 sudo bash install.sh                 # atau: sudo bash install.sh --bind 0.0.0.0  (hanya di belakang HTTPS)
 ```
 
+Jika dijalankan dari terminal interaktif, installer meminta direktori pemasangan (default `/opt/smartgov-agent`).
+Untuk otomasi/non-interaktif, gunakan `--dir /lokasi/yang/diinginkan`.
 Skrip meng-clone/menarik kode terbaru, membuat folder + permission, membuat network `smartgov-network` bila belum ada,
 **membangun image dari kode di server** (`up -d --build`), menunggu agent sehat, lalu menampilkan token setup.
 Aman dijalankan ulang untuk update. Catatan: skrip mengambil kode dari GitHub, jadi perubahan harus sudah di-push.
@@ -57,13 +59,15 @@ Dump database memakai `mariadb-dump --all-databases` serta menyertakan routines,
 
 ### Memilih folder aplikasi dari UI
 
-Container Agent hanya dapat membaca folder host yang sudah di-mount. Di tiap server, atur satu root host di file `.env` pada folder Agent, lalu rebuild/restart Agent:
+Container Agent hanya dapat membaca folder host yang sudah di-mount. Di tiap server, atur satu root host di file `.env` pada folder Agent:
 
 ```dotenv
 APP_SOURCE_HOST_ROOT=/opt/cartenz/teknolab/smartgov
 ```
 
-Buat direktori root tersebut di host, lalu jalankan `docker compose up -d --build` dari folder Agent. Mount tersedia read-only di container sebagai `/backup_sources`. Di Pengaturan Agent isi **Subfolder aplikasi** relatif terhadap root, misalnya `revenue`. Jika root server lain adalah `/home/cartenz/teknolab/smartgov`, atur nilai `.env` server itu ke path tersebut dan isi subfolder UI yang sama. Berikan user container (UID 1000) izin baca dan traverse pada folder serta file yang dipilih. Kosongkan kolom UI untuk menonaktifkan backup aplikasi.
+Buat direktori root tersebut di host, lalu jalankan `docker compose up -d` dari folder Agent agar mount container diperbarui; perubahan lokasi mount tidak memerlukan build image ulang. Mount tersedia read-only di container sebagai `/backup_sources`. Di Pengaturan Agent isi **Subfolder aplikasi** relatif terhadap root, misalnya `revenue`, lalu gunakan **Cek direktori** untuk memeriksa keberadaan dan izin bacanya. Isi direktori ditampilkan 100 item per halaman. Centang file untuk membackup file itu; centang folder untuk membackup seluruh isinya secara rekursif. Item lain yang tidak dipilih tidak masuk arsip. Pilihan diterapkan setelah pengaturan disimpan; jika tidak ada item dipilih, backup aplikasi dilewati. Tautan simbolis tidak dapat dipilih. Jika root server lain adalah `/home/cartenz/teknolab/smartgov`, atur nilai `.env` server itu ke path tersebut dan isi subfolder UI yang sama. Berikan user container (UID 1000) izin baca dan traverse pada folder serta file yang dipilih. Kosongkan kolom UI untuk menonaktifkan backup aplikasi.
+
+Konfigurasi lama yang belum memiliki daftar pilihan tetap membackup seluruh direktori seperti sebelumnya. Mengubah **Subfolder aplikasi** akan mengosongkan pilihan lama; periksa isi direktori dan pilih kembali item yang ingin dibackup.
 
 Path UI dibatasi ke subfolder di dalam root yang di-mount; path absolut dan traversal ke luar root ditolak.
 

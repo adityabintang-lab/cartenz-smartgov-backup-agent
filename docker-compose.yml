@@ -3,9 +3,6 @@ services:
     image: adityabintang/smartgov-backup-agent:v1.0
     build:
       context: .
-      args:
-        APT_MIRROR: ${APT_MIRROR:-https://deb.debian.org}
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     container_name: cartenz-smartgov-backup-agent
     restart: unless-stopped
     ports:

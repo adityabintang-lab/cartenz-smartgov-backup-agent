@@ -141,17 +141,108 @@ if [ -n "$APP_SOURCE_SUBPATH" ]; then
             log "ERROR: Path aplikasi mengarah ke luar root sumber yang di-mount."
             APP_SOURCE_DIR=""
             BACKUP_FAILED=1
-        elif [ -n "$(ls -A "$APP_SOURCE_DIR" 2>/dev/null)" ]; then
-            log "Menyalin berkas aplikasi dari ${APP_SOURCE_DIR}..."
-            if cp -a "$APP_SOURCE_DIR" "${APP_PAYLOAD}/app_data"; then
+        else
+            log "Menyalin berkas aplikasi dari ${APP_SOURCE_DIR} sesuai pilihan..."
+            if python3 - "$CONFIG_FILE" "$APP_SOURCE_DIR" "${APP_PAYLOAD}/app_data" <<'PY'
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+def fail(message):
+    print(f"ERROR: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    source = Path(sys.argv[2]).resolve(strict=True)
+    destination = Path(sys.argv[3])
+except (OSError, ValueError) as exc:
+    fail(f"Tidak dapat membaca konfigurasi atau direktori aplikasi ({type(exc).__name__}).")
+if not isinstance(config, dict):
+    fail("Format konfigurasi agent tidak valid.")
+
+selection = config.get("application_source_selection")
+if selection == []:
+    print("Tidak ada item aplikasi yang dipilih.")
+    raise SystemExit(3)
+if selection is None or selection == ["."]:
+    try:
+        if not any(source.iterdir()):
+            fail("Subfolder aplikasi kosong.")
+        shutil.copytree(source, destination, symlinks=True)
+    except OSError as exc:
+        fail(f"Gagal menyalin seluruh direktori aplikasi ({type(exc).__name__}).")
+    raise SystemExit(0)
+if not isinstance(selection, list) or not selection:
+    fail("Daftar pilihan aplikasi tidak valid.")
+
+selected = []
+for relative in selection:
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or relative.startswith("/")
+        or "\\" in relative
+        or any(ord(char) < 32 or ord(char) == 127 for char in relative)
+        or any(part in ("", ".", "..") for part in relative.split("/"))
+    ):
+        fail("Path pilihan aplikasi tidak valid.")
+    if relative not in selected:
+        selected.append(relative)
+
+selected.sort(key=lambda item: (item.count("/"), item))
+filtered = []
+for relative in selected:
+    if not any(relative.startswith(parent + "/") for parent in filtered):
+        filtered.append(relative)
+
+source_real = source.resolve(strict=True)
+try:
+    destination.mkdir(parents=True, exist_ok=True)
+except OSError as exc:
+    fail(f"Gagal menyiapkan folder staging aplikasi ({type(exc).__name__}).")
+for relative in filtered:
+    candidate = source
+    for part in relative.split("/"):
+        candidate = candidate / part
+        if candidate.is_symlink():
+            fail(f"Path pilihan '{relative}' berisi tautan simbolis; tautan tidak didukung.")
+    try:
+        selected_source = candidate.resolve(strict=True)
+        selected_source.relative_to(source_real)
+    except FileNotFoundError:
+        fail(f"Path pilihan '{relative}' tidak ditemukan.")
+    except OSError as exc:
+        fail(f"Tidak dapat membaca path pilihan '{relative}' ({type(exc).__name__}).")
+    except ValueError:
+        fail(f"Path pilihan '{relative}' mengarah ke luar direktori aplikasi.")
+    target = destination.joinpath(*relative.split("/"))
+    try:
+        if selected_source.is_dir():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(selected_source, target, symlinks=True)
+        elif selected_source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(selected_source, target)
+        else:
+            fail(f"Path pilihan '{relative}' bukan file atau direktori.")
+    except OSError as exc:
+        fail(f"Gagal menyalin '{relative}' ({type(exc).__name__}).")
+PY
+            then
                 APP_READY=1
             else
-                log "ERROR: Gagal menyalin berkas aplikasi."
-                BACKUP_FAILED=1
+                COPY_STATUS=$?
+                if [ "$COPY_STATUS" -eq 3 ]; then
+                    log "Tidak ada item aplikasi yang dipilih; backup aplikasi dilewati."
+                else
+                    log "ERROR: Gagal menyalin berkas aplikasi."
+                    BACKUP_FAILED=1
+                fi
             fi
-        else
-            log "ERROR: Subfolder aplikasi '${APP_SOURCE_SUBPATH}' kosong atau tidak dapat dibaca."
-            BACKUP_FAILED=1
         fi
     fi
 else

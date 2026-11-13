@@ -9,6 +9,7 @@
 set -Eeuo pipefail
 
 APP_DIR="/opt/smartgov-agent"
+APP_DIR_SET=0
 REPO_URL="https://github.com/adityabintang-lab/cartenz-smartgov-backup-agent.git"
 BRANCH="main"
 NETWORK="smartgov-network"      # harus sama dengan network di docker-compose.yml
@@ -34,11 +35,15 @@ trap 'echo "ERROR: instalasi berhenti di baris $LINENO." >&2' ERR
 while [ $# -gt 0 ]; do
     case "$1" in
         --bind) [ $# -ge 2 ] || die "--bind membutuhkan nilai."; BIND_ADDR="$2"; shift 2 ;;
-        --dir)  [ $# -ge 2 ] || die "--dir membutuhkan nilai.";  APP_DIR="$2";   shift 2 ;;
+        --dir)  [ $# -ge 2 ] || die "--dir membutuhkan nilai.";  APP_DIR="$2"; APP_DIR_SET=1; shift 2 ;;
         -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
         *) die "Argumen tidak dikenal: $1" ;;
     esac
 done
+if [ "$APP_DIR_SET" -eq 0 ] && [ -t 0 ]; then
+    read -r -p "Direktori instalasi Agent [${APP_DIR}]: " INPUT_APP_DIR
+    APP_DIR="${INPUT_APP_DIR:-$APP_DIR}"
+fi
 if [ -n "$BIND_ADDR" ] && ! [[ "$BIND_ADDR" =~ ^[0-9a-fA-F:.]+$ ]]; then die "Nilai --bind tidak valid: $BIND_ADDR"; fi
 if [ "$(id -u)" -ne 0 ]; then command -v sudo >/dev/null 2>&1 || die "Jalankan sebagai root atau pasang sudo."; fi
 
