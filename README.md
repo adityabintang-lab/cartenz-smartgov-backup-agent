@@ -35,7 +35,7 @@ Dashboard: `http://127.0.0.1:25200` (default hanya localhost). Akses remote: SSH
 (`ssh -L 25200:127.0.0.1:25200 server`) atau reverse proxy HTTPS. Untuk membuka ke jaringan:
 `AGENT_BIND_ADDR=0.0.0.0` di `.env` — utamakan TLS; tanpa TLS, batasi ke jaringan internal/VPN dan firewall ketat. Login dashboard memakai cookie sesi `HttpOnly` dan `SameSite=Strict`; atribut `Secure` dipasang saat akses HTTPS. API juga tetap menerima HTTP Basic untuk kompatibilitas. Session berlaku 8 jam dan hilang saat Agent restart.
 
-Dashboard menyediakan pilihan mode terang/gelap dan menyimpan pilihan di browser. Font Plus Jakarta Sans disajikan lokal dari `assets/fonts/`, sehingga browser tidak perlu menghubungi font host pihak ketiga. Lisensi font tersimpan bersama font pada `assets/fonts/OFL.txt`.
+Dashboard menyediakan pilihan mode terang/gelap dan menyimpan pilihan di browser. Komponen UI memakai Bootstrap 5.3.8 dari jsDelivr; browser perlu dapat mengakses CDN agar styling Bootstrap termuat. CSS dipatok versinya dan diverifikasi dengan SRI, sedangkan fungsi dashboard tidak bergantung pada JavaScript Bootstrap. Font Plus Jakarta Sans disajikan lokal dari `assets/fonts/`, sehingga browser tidak perlu menghubungi font host pihak ketiga. Lisensi font tersimpan bersama font pada `assets/fonts/OFL.txt`.
 
 Dashboard tetap dapat dipakai melalui HTTP untuk lingkungan yang belum memiliki TLS; pada HTTPS cookie diberi atribut `Secure`, sedangkan pada HTTP atribut tersebut tidak dipasang agar sesi tetap berfungsi. HTTP tidak mengenkripsi password, cookie, maupun data dashboard. Batasi penggunaan HTTP ke jaringan internal/VPN tepercaya dan firewall; gunakan HTTPS bila memungkinkan.
 

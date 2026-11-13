@@ -574,7 +574,7 @@ async def security_headers(request: Request, call_next):
     else:
         response = await call_next(request)
     response.headers["Content-Security-Policy"] = (
-        f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
+        f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}' https://cdn.jsdelivr.net; "
         "connect-src 'self'; img-src 'self' data:; font-src 'self'; form-action 'self'; "
         "base-uri 'none'; frame-ancestors 'none'"
     )
@@ -718,7 +718,7 @@ def esc(v: Any) -> str:
 
 
 def field(fid: str, label: str, *, type: str = "text", value: Any = "", required: bool = False,
-          hint: str = "", **attrs: Any) -> str:
+          hint: str = "", container_id: str = "", **attrs: Any) -> str:
     a: Dict[str, Any] = {"id": fid, "name": fid, "type": type}
     if value != "":
         a["value"] = value
@@ -729,8 +729,10 @@ def field(fid: str, label: str, *, type: str = "text", value: Any = "", required
     hint_html = ""
     if hint:
         attr += f' aria-describedby="{fid}-h"'
-        hint_html = f'<div class="hint" id="{fid}-h">{esc(hint)}</div>'
-    return f'<div class="field"><label for="{fid}">{esc(label)}</label><input {attr}>{hint_html}</div>'
+        hint_html = f'<div class="form-text hint" id="{fid}-h">{esc(hint)}</div>'
+    wrapper_id = f' id="{esc(container_id)}"' if container_id else ""
+    return (f'<div class="col-12 col-md"{wrapper_id}><label class="form-label" for="{fid}">{esc(label)}</label>'
+            f'<input class="form-control" {attr}>{hint_html}</div>')
 
 
 def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
@@ -744,24 +746,24 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
     token = ""
     if setup:
         token = (
-            "<fieldset><legend>0. Verifikasi pemilik server</legend>"
+            '<fieldset class="mb-4"><legend>0. Verifikasi pemilik server</legend><div class="row g-3">'
             + field("setup_token", "Token setup", type="password", required=True, autocomplete="off",
                     hint="Token dicetak di log container saat start pertama: docker logs cartenz-smartgov-backup-agent")
-            + "</fieldset>"
+            + "</div></fieldset>"
         )
     pw_hint = "Minimal 12 karakter, ASCII." if setup else keep + ". Minimal 12 karakter, ASCII."
     confirm = field("admin_password2", "Ulangi password admin", type="password", autocomplete="new-password",
                     required=setup)
     return (
         '<form id="settings-form" method="post" action="/" autocomplete="off">' + token
-        + "<fieldset><legend>1. Akun admin dashboard</legend><div class=\"row\">"
+        + '<fieldset class="mb-4"><legend>1. Akun admin dashboard</legend><div class="row g-3">'
         + field("admin_user", "Username", value=cfg.get("admin_user", "admin"), required=True,
                 autocomplete="username", minlength=3, maxlength=32)
         + field("admin_password", "Password", type="password", required=setup, autocomplete="new-password",
                 minlength=12, maxlength=128, hint=pw_hint)
         + confirm
         + "</div></fieldset>"
-        + "<fieldset><legend>2. Database MariaDB lokal</legend><div class=\"row\">"
+        + '<fieldset class="mb-4"><legend>2. Database MariaDB lokal</legend><div class="row g-3">'
         + field("db_host", "Host", value=cfg.get("db_host", "smartgov-mariadb"), required=True)
         + field("db_port", "Port", type="number", value=cfg.get("db_port", 3306), required=True, min=1, max=65535)
         + field("db_name", "Database untuk uji koneksi", value=cfg.get("db_name", ""), required=True,
@@ -770,47 +772,47 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
         + field("db_pass", "Password", type="password", required=setup, autocomplete="new-password",
                 hint="" if setup else keep)
         + "</div></fieldset>"
-        + "<fieldset><legend>3. Berkas aplikasi opsional</legend><div class=\"row\">"
+        + '<fieldset class="mb-4"><legend>3. Berkas aplikasi opsional</legend><div class="row g-3">'
         + field("application_source_path", "Subfolder aplikasi", value=cfg.get("application_source_path", ""),
                 placeholder="revenue",
                 hint="Path relatif di bawah root host yang di-mount read-only. Kosongkan jika tidak ingin backup berkas aplikasi.")
         + "</div></fieldset>"
-        + "<fieldset><legend>4. Server pusat</legend><div class=\"row\">"
+        + '<fieldset class="mb-4"><legend>4. Server pusat</legend><div class="row g-3">'
         + field("central_url", "Central Gateway URL", type="url", value=cfg.get("central_url", ""), required=True,
                 placeholder="https://pusat.example.go.id:25300", hint="Gunakan https:// agar token terenkripsi.")
         + field("agent_token", "Agent API token", type="password", required=setup, autocomplete="new-password",
                 hint="" if setup else keep)
         + "</div></fieldset>"
-        + "<fieldset><legend>5. Enkripsi</legend><div class=\"row\">"
+        + '<fieldset class="mb-4"><legend>5. Enkripsi</legend><div class="row g-3">'
         + field("age_recipient", "Public key age (disarankan)", value=cfg.get("age_recipient", ""),
                 placeholder="age1...", spellcheck="false",
                 hint="Buat dengan 'age-keygen' di komputer Anda dan simpan private key OFFLINE. Jika kosong, "
                      "agent membuat keypair di server ini (kurang aman).")
         + "</div></fieldset>"
-        + "<fieldset><legend>6. Jadwal backup</legend>"
-        + '<div class="row"><div class="field"><label for="schedule_mode">Pola jadwal</label>'
-        + '<select id="schedule_mode" name="schedule_mode">'
+        + '<fieldset class="mb-4"><legend>6. Jadwal backup</legend>'
+        + '<div class="row g-3"><div class="col-12 col-md"><label class="form-label" for="schedule_mode">Pola jadwal</label>'
+        + '<select class="form-select" id="schedule_mode" name="schedule_mode">'
         + f'<option value="interval" {"selected" if schedule_mode == "interval" else ""}>Setiap interval</option>'
         + f'<option value="daily" {"selected" if schedule_mode == "daily" else ""}>Harian</option>'
         + f'<option value="monthly" {"selected" if schedule_mode == "monthly" else ""}>Bulanan</option>'
         + "</select></div></div>"
-        + '<div class="row" id="interval-settings">'
+        + '<div class="row g-3" id="interval-settings">'
         + field("interval_value", "Jalankan setiap", type="number", value=interval_value,
                 required=True, min=1, max=168)
-        + '<div class="field"><label for="interval_unit">Satuan interval</label>'
-        + f'<select id="interval_unit" name="interval_unit">'
+        + '<div class="col-12 col-md"><label class="form-label" for="interval_unit">Satuan interval</label>'
+        + f'<select class="form-select" id="interval_unit" name="interval_unit">'
         + f'<option value="minutes" {"selected" if interval_unit == "minutes" else ""}>Menit</option>'
         + f'<option value="hours" {"selected" if interval_unit == "hours" else ""}>Jam</option>'
         + "</select></div></div>"
-        + '<div class="row" id="calendar-settings">'
+        + '<div class="row g-3" id="calendar-settings">'
         + field("schedule_time", "Waktu (lokal server)", type="time",
                 value=cfg.get("schedule_time", "02:00"), required=True)
-        + '<div id="monthly-schedule-field">'
         + field("monthly_day", "Tanggal dalam bulan", type="number", value=cfg.get("monthly_day", 1),
-                required=True, min=1, max=31, hint="Jika tanggal tidak ada di bulan tersebut, jadwal memakai hari terakhir.")
-        + "</div></div>"
+                required=True, min=1, max=31, container_id="monthly-schedule-field",
+                hint="Jika tanggal tidak ada di bulan tersebut, jadwal memakai hari terakhir.")
+        + "</div>"
         + "</fieldset>"
-        + "<fieldset><legend>7. Batas arsip per agent (lokal dan COS)</legend><div class=\"row\">"
+        + '<fieldset class="mb-4"><legend>7. Batas arsip per agent (lokal dan COS)</legend><div class="row g-3">'
         + field("database_max_files", "Maksimum arsip database", type="number",
                 value=cfg.get("database_max_files", 7), required=True, min=1, max=3650,
                 hint="Arsip lokal dirotasi setelah dibuat; arsip COS setelah berhasil diunggah.")
@@ -818,8 +820,9 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
                 value=cfg.get("application_max_files", 2), required=True, min=1, max=3650,
                 hint="Arsip lokal dirotasi setelah dibuat; arsip COS setelah berhasil diunggah.")
         + "</div></fieldset>"
-        + '<label class="check"><input type="checkbox" id="show-pw"> Tampilkan password</label>'
-        + '<button type="submit" class="primary" id="save-btn">'
+        + '<div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="show-pw">'
+        + '<label class="form-check-label" for="show-pw">Tampilkan password</label></div>'
+        + '<button type="submit" class="btn btn-primary" id="save-btn">'
         + ("Simpan &amp; aktifkan agent" if setup else "Simpan pengaturan")
         + "</button></form>"
     )
@@ -827,60 +830,39 @@ def settings_form(cfg: Dict[str, Any], setup: bool) -> str:
 
 CSS = """
 :root{color-scheme:dark;--bg:#0f172a;--card:#1e293b;--bd:#334155;--fg:#f8fafc;--mut:#94a3b8;--in:#0f172a;
---pri:#2563eb;--link:#60a5fa;--ok:#4ade80;--warn:#fbbf24;--err:#f87171}
+--pri:#2563eb;--link:#60a5fa;--ok:#4ade80;--warn:#fbbf24;--err:#f87171;
+--bs-body-bg:var(--bg);--bs-body-color:var(--fg);--bs-secondary-color:var(--mut);--bs-border-color:var(--bd);
+--bs-tertiary-bg:var(--in);--bs-card-bg:var(--card);--bs-card-border-color:var(--bd)}
 @media (prefers-color-scheme:light){:root:not([data-theme]){color-scheme:light;--bg:#f1f5f9;--card:#fff;--bd:#cbd5e1;--fg:#0f172a;--mut:#475569;
---in:#fff;--link:#1d4ed8;--ok:#15803d;--warn:#b45309;--err:#b91c1c}}
+--in:#fff;--link:#1d4ed8;--ok:#15803d;--warn:#b45309;--err:#b91c1c;--bs-card-bg:#fff}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#0f172a;--card:#1e293b;--bd:#334155;--fg:#f8fafc;--mut:#94a3b8;--in:#0f172a;
---pri:#2563eb;--link:#60a5fa;--ok:#4ade80;--warn:#fbbf24;--err:#f87171}
+--pri:#2563eb;--link:#60a5fa;--ok:#4ade80;--warn:#fbbf24;--err:#f87171;--bs-card-bg:var(--card)}
 :root[data-theme="light"]{color-scheme:light;--bg:#f1f5f9;--card:#fff;--bd:#cbd5e1;--fg:#0f172a;--mut:#475569;
---in:#fff;--link:#1d4ed8;--ok:#15803d;--warn:#b45309;--err:#b91c1c}
+--in:#fff;--link:#1d4ed8;--ok:#15803d;--warn:#b45309;--err:#b91c1c;--bs-card-bg:#fff}
 @font-face{font-family:"Plus Jakarta Sans";src:url("/assets/fonts/PlusJakartaSans-VF.ttf") format("truetype");
 font-style:normal;font-weight:200 800;font-display:swap}
-*,*::before,*::after{box-sizing:border-box}
 [hidden]{display:none!important}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 "Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-.wrap{max-width:880px;margin:0 auto;padding:24px 16px 64px}
-h1{font-size:1.5rem;margin:0}.page-header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}
-.header-actions{display:flex;align-items:center;gap:8px}
-.sub{color:var(--mut);margin:0 0 20px}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:20px;margin-bottom:16px}
-.card h2{font-size:1.05rem;margin:0 0 12px}
-.login-card{max-width:440px;margin:clamp(24px,8vh,80px) auto;padding:24px}
-.login-form .row{grid-template-columns:minmax(0,1fr);gap:16px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin-bottom:16px}
+body{min-height:100vh;background:var(--bg);color:var(--fg);font-family:"Plus Jakarta Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.page-header h1{font-size:1.5rem;margin:0}
+.sub{color:var(--mut)}
+.card{border-radius:12px}
+.card h2{font-size:1.05rem}
+.login-card{max-width:440px;margin:clamp(24px,8vh,80px) auto}
+.login-card .card-body{padding:24px}
 .k{color:var(--mut);font-size:.78rem;text-transform:uppercase;letter-spacing:.05em}
 .v{font-weight:600;word-break:break-word}
 .chip{display:inline-block;padding:1px 10px;border-radius:999px;font-size:.88rem;font-weight:600;border:1px solid currentColor}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}
-.actions{display:flex;flex-wrap:wrap;gap:8px}
-.banner,.notice{border:1px solid currentColor;border-radius:8px;padding:10px 14px;margin-bottom:12px;white-space:pre-line}
-fieldset{border:0;padding:0;margin:0 0 20px;min-width:0}
 legend{font-weight:600;color:var(--link);padding:0;margin-bottom:8px}
-.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
-label{display:block;font-size:.9rem;margin-bottom:4px}
-input[type=text],input[type=password],input[type=number],input[type=url],input[type=time],select{width:100%;min-height:44px;padding:8px 12px;
-font:inherit;color:inherit;background:var(--in);border:1px solid var(--bd);border-radius:8px}
-.hint{color:var(--mut);font-size:.82rem;margin-top:4px}
-.check{display:flex;align-items:center;gap:8px;margin:0 0 16px;min-height:44px}
-.check input{width:20px;height:20px}
-button{min-height:44px;padding:8px 16px;font:inherit;color:inherit;background:transparent;border:1px solid var(--bd);
-border-radius:8px;cursor:pointer;transition:background-color .15s ease,border-color .15s ease,transform .15s ease}
-button.primary{background:var(--pri);border-color:var(--pri);color:#fff;font-weight:600}
-button.primary.login-submit{width:100%;min-height:48px;margin-top:20px;border-radius:10px;font-weight:700}
-button.primary.login-submit:hover{filter:brightness(1.08);transform:translateY(-1px)}
-button.logout-btn{min-height:40px;padding:7px 16px;border-color:var(--bd);border-radius:10px;color:var(--mut);font-weight:600}
-button.logout-btn:hover{color:var(--fg);background:var(--card);border-color:var(--link)}
-button.theme-btn{min-height:40px;padding:7px 12px;border-color:var(--bd);border-radius:10px;color:var(--fg);font-weight:600}
-button.theme-btn:hover{background:var(--card);border-color:var(--link)}
-button:disabled{opacity:.6;cursor:not-allowed}
+.hint{color:var(--mut);font-size:.82rem}
+.form-control,.form-select{min-height:44px}
+.form-check-input{cursor:pointer}
 :focus-visible{outline:3px solid var(--link);outline-offset:2px}
 .scroll{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:.9rem}
-th,td{text-align:left;padding:8px;border-bottom:1px solid var(--bd);white-space:nowrap}
 pre.log{max-height:320px;overflow:auto;margin:0;padding:12px;background:var(--in);border:1px solid var(--bd);
 border-radius:8px;font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word}
 details>summary{cursor:pointer;font-weight:600;min-height:44px;display:flex;align-items:center}
-@media(max-width:420px){.page-header{gap:8px;flex-wrap:wrap}h1{font-size:1.25rem}.login-card{padding:18px}}
+@media(max-width:420px){.page-header{flex-wrap:wrap}.page-header h1{font-size:1.25rem}.login-card .card-body{padding:18px}}
 """
 
 JS = r"""
@@ -897,11 +879,13 @@ if (themeToggle) {
     (systemTheme.matches ? 'light' : 'dark');
   const updateThemeLabel = () => {
     const dark = currentTheme() === 'dark';
+    document.documentElement.dataset.bsTheme = dark ? 'dark' : 'light';
     themeToggle.textContent = dark ? 'Mode terang' : 'Mode gelap';
   };
   themeToggle.addEventListener('click', () => {
     const next = currentTheme() === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
+    document.documentElement.dataset.bsTheme = next;
     updateThemeLabel();
     try {
       localStorage.setItem('agent-theme', next);
@@ -933,7 +917,7 @@ async function api(method, url, body, headers) {
 }
 function notice(kind, text) {
   const n = $('#notice');
-  n.className = 'notice ' + kind;
+  n.className = 'alert alert-' + (kind === 'ok' ? 'success' : kind === 'warn' ? 'warning' : 'danger');
   n.textContent = text || '';
   n.hidden = !text;
   if (text) n.scrollIntoView({block: 'nearest', behavior: 'smooth'});
@@ -1129,14 +1113,16 @@ def render_page(nonce: str, mode: str, user: str, inner: str) -> str:
         f'<script nonce="{nonce}">try{{const theme=localStorage.getItem("agent-theme");'
         'if(theme==="light"||theme==="dark")document.documentElement.dataset.theme=theme;}'
         'catch(e){console.warn("Pilihan tema tersimpan tidak dapat dibaca.",e);}</script>'
+        f'<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" '
+        'integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">'
         f'<style nonce="{nonce}">{CSS}</style></head>'
-        f'<body data-mode="{esc(mode)}" data-user="{esc(user)}"><main class="wrap">'
-        '<header class="page-header"><h1>SmartGOV Backup Agent</h1>'
-        '<div class="header-actions"><button type="button" class="theme-btn" id="theme-toggle"></button>'
-        + ('<button type="button" class="logout-btn" id="logout-btn">Keluar</button>' if mode == "dashboard" else "")
+        f'<body data-mode="{esc(mode)}" data-user="{esc(user)}"><main class="container py-4 pb-5">'
+        '<header class="page-header d-flex align-items-center justify-content-between gap-3 mb-3"><h1>SmartGOV Backup Agent</h1>'
+        '<div class="d-flex align-items-center gap-2"><button type="button" class="btn btn-outline-secondary" id="theme-toggle"></button>'
+        + ('<button type="button" class="btn btn-outline-secondary" id="logout-btn">Keluar</button>' if mode == "dashboard" else "")
         + "</div></header>"
         + inner
-        + "<noscript><p class=\"banner err\">Dashboard ini memerlukan JavaScript.</p></noscript>"
+        +         "<noscript><p class=\"alert alert-danger\">Dashboard ini memerlukan JavaScript.</p></noscript>"
         f'</main><script nonce="{nonce}">{JS}</script></body></html>'
     )
 
@@ -1145,7 +1131,7 @@ def setup_view() -> str:
     return (
         '<p class="sub">Setup awal — hanya bisa dilakukan sekali.</p>'
         '<div id="notice" role="alert" hidden></div>'
-        '<section class="card"><h2>Setup Wizard</h2>' + settings_form({}, setup=True) + "</section>"
+        '<section class="card mb-3"><div class="card-body"><h2>Setup Wizard</h2>' + settings_form({}, setup=True) + "</div></section>"
     )
 
 
@@ -1153,17 +1139,17 @@ def login_view() -> str:
     return (
         '<p class="sub">Masuk untuk mengelola backup server ini.</p>'
         '<div id="notice" role="alert" hidden></div>'
-        '<div id="transport-warning" class="banner warn" role="alert" hidden>'
+        '<div id="transport-warning" class="alert alert-warning" role="alert" hidden>'
         'Koneksi ini menggunakan HTTP tanpa enkripsi. Password, cookie sesi, dan data dashboard dapat disadap '
         'pada jaringan. Gunakan hanya di jaringan internal/VPN tepercaya dan aktifkan HTTPS bila memungkinkan.</div>'
-        '<section class="card login-card">'
+        '<section class="card login-card"><div class="card-body">'
         '<h2>Masuk ke dashboard</h2><form id="login-form" class="login-form" autocomplete="on">'
-        '<div class="row"><div class="field"><label for="login-user">Username</label>'
-        '<input id="login-user" name="username" type="text" autocomplete="username" required maxlength="32"></div>'
-        '<div class="field"><label for="login-password">Password</label>'
-        '<input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128"></div></div>'
-        '<button type="submit" class="primary login-submit" id="login-btn">Masuk</button>'
-        '</form></section>'
+        '<div class="row g-3"><div class="col-12"><label class="form-label" for="login-user">Username</label>'
+        '<input class="form-control" id="login-user" name="username" type="text" autocomplete="username" required maxlength="32"></div>'
+        '<div class="col-12"><label class="form-label" for="login-password">Password</label>'
+        '<input class="form-control" id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="128"></div></div>'
+        '<button type="submit" class="btn btn-primary w-100 mt-3" id="login-btn">Masuk</button>'
+        '</form></div></section>'
     )
 
 
@@ -1171,24 +1157,24 @@ def dashboard_view(cfg: Dict[str, Any]) -> str:
     return (
         '<p class="sub">Backup MariaDB terenkripsi dan sinkronisasi ke Object Storage.</p>'
         '<div id="notice" role="status" aria-live="polite" hidden></div>'
-        '<div id="warn-key" class="banner warn" role="alert" hidden><strong>Private key enkripsi masih ada di server ini.</strong> '
+        '<div id="warn-key" class="alert alert-warning" role="alert" hidden><strong>Private key enkripsi masih ada di server ini.</strong> '
         "Siapa pun yang menguasai server dapat membuka backup. Salin <code>secrets/age_key.txt</code> ke tempat aman, "
         "hapus dari server, lalu isi “Public key age” di Pengaturan.</div>"
-        '<div id="warn-http" class="banner warn" role="alert" hidden>Server pusat memakai <strong>HTTP</strong> (tanpa TLS): '
+        '<div id="warn-http" class="alert alert-warning" role="alert" hidden>Server pusat memakai <strong>HTTP</strong> (tanpa TLS): '
         "token agent terkirim tanpa enkripsi. Gunakan https://.</div>"
-        '<section class="card"><h2>Status</h2><div class="grid">'
-        '<div><div class="k">Backup terakhir</div><div class="v" id="st-last">Memuat…</div>'
+        '<section class="card mb-3"><div class="card-body"><h2>Status</h2><div class="row g-3 mb-3">'
+        '<div class="col-12 col-md-6"><div class="k">Backup terakhir</div><div class="v" id="st-last">Memuat…</div>'
         '<div class="hint" id="st-last-time"></div></div>'
-        '<div><div class="k">Backup berikutnya</div><div class="v" id="st-next">—</div></div>'
-        '<div><div class="k">Arsip lokal</div><div class="v" id="st-count">—</div></div>'
-        '<div><div class="k">Disk bebas</div><div class="v" id="st-disk">—</div></div></div>'
-        '<div class="actions"><button type="button" class="primary" id="run-btn">Backup sekarang</button>'
-        '<button type="button" id="db-btn">Uji koneksi database</button></div></section>'
-        '<section class="card"><h2>Arsip terbaru</h2><div class="scroll"><table>'
-        "<thead><tr><th>Nama</th><th>Ukuran</th><th>Waktu</th></tr></thead><tbody id=\"files\"></tbody></table></div></section>"
-        '<section class="card"><h2>Log backup</h2><pre class="log" id="log" tabindex="0" aria-label="Log backup">Memuat…</pre></section>'
-        '<section class="card"><details open><summary>Pengaturan Agent</summary>' + settings_form(cfg, setup=False)
-        + "</details></section>"
+        '<div class="col-12 col-md-6"><div class="k">Backup berikutnya</div><div class="v" id="st-next">—</div></div>'
+        '<div class="col-12 col-md-6"><div class="k">Arsip lokal</div><div class="v" id="st-count">—</div></div>'
+        '<div class="col-12 col-md-6"><div class="k">Disk bebas</div><div class="v" id="st-disk">—</div></div></div>'
+        '<div class="d-flex flex-wrap gap-2"><button type="button" class="btn btn-primary" id="run-btn">Backup sekarang</button>'
+        '<button type="button" class="btn btn-outline-secondary" id="db-btn">Uji koneksi database</button></div></div></section>'
+        '<section class="card mb-3"><div class="card-body"><h2>Arsip terbaru</h2><div class="table-responsive"><table class="table table-hover align-middle mb-0">'
+        "<thead><tr><th>Nama</th><th>Ukuran</th><th>Waktu</th></tr></thead><tbody id=\"files\"></tbody></table></div></div></section>"
+        '<section class="card mb-3"><div class="card-body"><h2>Log backup</h2><pre class="log" id="log" tabindex="0" aria-label="Log backup">Memuat…</pre></div></section>'
+        '<section class="card mb-3"><div class="card-body"><details open><summary>Pengaturan Agent</summary>' + settings_form(cfg, setup=False)
+        + "</details></div></section>"
     )
 
 
