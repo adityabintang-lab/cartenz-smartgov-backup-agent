@@ -13,6 +13,15 @@ Skrip meng-clone/menarik kode terbaru, membuat folder + permission, membuat netw
 **membangun image dari kode di server** (`up -d --build`), menunggu agent sehat, lalu menampilkan token setup.
 Aman dijalankan ulang untuk update. Catatan: skrip mengambil kode dari GitHub, jadi perubahan harus sudah di-push.
 
+Build memakai repository Debian melalui HTTPS, retry APT/PyPI untuk gangguan sementara, dan memaksa IPv4 untuk mengakomodasi host/Docker network yang tidak memiliki konektivitas IPv6. Jika mirror default tidak dapat dijangkau dari jaringan server, sebelum menjalankan ulang installer tambahkan mirror HTTPS yang tersedia di `.env`:
+
+```dotenv
+APT_MIRROR=https://mirror.example.go.id
+PIP_INDEX_URL=https://pypi.org/simple
+```
+
+`APT_MIRROR` harus berupa root mirror Debian tanpa akhiran `/debian`; Compose menambahkan path repository Debian secara otomatis. Installer mempertahankan pengaturan lain di `.env` saat opsi `--bind` digunakan. Setelah build gagal, aman untuk menjalankan ulang `sudo bash install.sh`; tidak perlu menghapus container, image, atau data backup. Jika tetap gagal, periksa DNS dan akses keluar container Docker ke HTTPS port 443, proxy/firewall, lalu coba mirror HTTPS lain yang dekat dengan server. Jangan menonaktifkan verifikasi sertifikat TLS.
+
 ## Menjalankan manual
 
 ```bash

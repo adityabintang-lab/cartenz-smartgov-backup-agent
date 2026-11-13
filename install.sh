@@ -19,6 +19,16 @@ TOTAL=7
 die()  { echo "ERROR: $*" >&2; exit 1; }
 step() { echo; echo "[$1/${TOTAL}] $2"; }
 run()  { if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi; }
+set_env_value() {
+    local key="$1" value="$2" env_file="${APP_DIR}/.env" tmp_file
+    tmp_file="$(run mktemp "${APP_DIR}/.env.XXXXXX")"
+    if run test -f "${env_file}"; then
+        run awk -v key="${key}" 'index($0, key "=") != 1' "${env_file}" | run tee "${tmp_file}" >/dev/null
+    fi
+    printf '%s=%s\n' "${key}" "${value}" | run tee -a "${tmp_file}" >/dev/null
+    run chmod 600 "${tmp_file}"
+    run mv -f "${tmp_file}" "${env_file}"
+}
 trap 'echo "ERROR: instalasi berhenti di baris $LINENO." >&2' ERR
 
 while [ $# -gt 0 ]; do
@@ -87,7 +97,7 @@ fi
 # ---------------------------------------------------------
 step 6 "Menulis konfigurasi (.env)..."
 if [ -n "${BIND_ADDR}" ]; then
-    printf 'AGENT_BIND_ADDR=%s\n' "${BIND_ADDR}" | run tee "${APP_DIR}/.env" >/dev/null
+    set_env_value AGENT_BIND_ADDR "${BIND_ADDR}"
     echo "Dashboard akan di-bind ke ${BIND_ADDR}:25200"
     [ "${BIND_ADDR}" = "127.0.0.1" ] || echo "PERINGATAN: dashboard memakai HTTP Basic; pasang HTTPS (reverse proxy) sebelum diakses lewat jaringan."
 else
